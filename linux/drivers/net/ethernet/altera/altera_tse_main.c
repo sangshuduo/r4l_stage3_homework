@@ -990,7 +990,6 @@ static int tse_shutdown(struct net_device *dev)
 	int ret;
 
 	phylink_stop(priv->phylink);
-	phylink_disconnect_phy(priv->phylink);
 	netif_stop_queue(dev);
 	napi_disable(&priv->napi);
 

@@ -696,10 +696,7 @@ next_slot:
 						args->start - extent_offset,
 						0, false);
 				ret = btrfs_inc_extent_ref(trans, &ref);
-				if (ret) {
-					btrfs_abort_transaction(trans, ret);
-					break;
-				}
+				BUG_ON(ret); /* -ENOMEM */
 			}
 			key.offset = args->start;
 		}
@@ -786,10 +783,7 @@ delete_extent_item:
 						key.offset - extent_offset, 0,
 						false);
 				ret = btrfs_free_extent(trans, &ref);
-				if (ret) {
-					btrfs_abort_transaction(trans, ret);
-					break;
-				}
+				BUG_ON(ret); /* -ENOMEM */
 				args->bytes_found += extent_end - key.offset;
 			}
 
@@ -1604,19 +1598,14 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 						write_bytes);
 			else
 				btrfs_check_nocow_unlock(BTRFS_I(inode));
-
-			if (nowait && ret == -ENOSPC)
-				ret = -EAGAIN;
 			break;
 		}
 
 		release_bytes = reserve_bytes;
 again:
 		ret = balance_dirty_pages_ratelimited_flags(inode->i_mapping, bdp_flags);
-		if (ret) {
-			btrfs_delalloc_release_extents(BTRFS_I(inode), reserve_bytes);
+		if (ret)
 			break;
-		}
 
 		/*
 		 * This is going to setup the pages array with the number of
@@ -1776,7 +1765,6 @@ static ssize_t btrfs_direct_write(struct kiocb *iocb, struct iov_iter *from)
 	loff_t endbyte;
 	ssize_t err;
 	unsigned int ilock_flags = 0;
-	struct iomap_dio *dio;
 
 	if (iocb->ki_flags & IOCB_NOWAIT)
 		ilock_flags |= BTRFS_ILOCK_TRY;
@@ -1837,21 +1825,10 @@ relock:
 	 * So here we disable page faults in the iov_iter and then retry if we
 	 * got -EFAULT, faulting in the pages before the retry.
 	 */
+again:
 	from->nofault = true;
-	dio = btrfs_dio_write(iocb, from, written);
+	err = btrfs_dio_rw(iocb, from, written);
 	from->nofault = false;
-
-	/*
-	 * iomap_dio_complete() will call btrfs_sync_file() if we have a dsync
-	 * iocb, and that needs to lock the inode. So unlock it before calling
-	 * iomap_dio_complete() to avoid a deadlock.
-	 */
-	btrfs_inode_unlock(inode, ilock_flags);
-
-	if (IS_ERR_OR_NULL(dio))
-		err = PTR_ERR_OR_ZERO(dio);
-	else
-		err = iomap_dio_complete(dio);
 
 	/* No increment (+=) because iomap returns a cumulative value. */
 	if (err > 0)
@@ -1878,9 +1855,11 @@ relock:
 		} else {
 			fault_in_iov_iter_readable(from, left);
 			prev_left = left;
-			goto relock;
+			goto again;
 		}
 	}
+
+	btrfs_inode_unlock(inode, ilock_flags);
 
 	/*
 	 * If 'err' is -ENOTBLK or we have not written all data, then it means
@@ -3671,7 +3650,7 @@ bool btrfs_find_delalloc_in_range(struct btrfs_inode *inode, u64 start, u64 end,
 	u64 prev_delalloc_end = 0;
 	bool ret = false;
 
-	while (cur_offset <= end) {
+	while (cur_offset < end) {
 		u64 delalloc_start;
 		u64 delalloc_end;
 		bool delalloc;
@@ -3838,7 +3817,6 @@ static loff_t find_desired_extent(struct btrfs_inode *inode, loff_t offset,
 		struct extent_buffer *leaf = path->nodes[0];
 		struct btrfs_file_extent_item *extent;
 		u64 extent_end;
-		u8 type;
 
 		if (path->slots[0] >= btrfs_header_nritems(leaf)) {
 			ret = btrfs_next_leaf(root, path);
@@ -3893,16 +3871,10 @@ static loff_t find_desired_extent(struct btrfs_inode *inode, loff_t offset,
 
 		extent = btrfs_item_ptr(leaf, path->slots[0],
 					struct btrfs_file_extent_item);
-		type = btrfs_file_extent_type(leaf, extent);
 
-		/*
-		 * Can't access the extent's disk_bytenr field if this is an
-		 * inline extent, since at that offset, it's where the extent
-		 * data starts.
-		 */
-		if (type == BTRFS_FILE_EXTENT_PREALLOC ||
-		    (type == BTRFS_FILE_EXTENT_REG &&
-		     btrfs_file_extent_disk_bytenr(leaf, extent) == 0)) {
+		if (btrfs_file_extent_disk_bytenr(leaf, extent) == 0 ||
+		    btrfs_file_extent_type(leaf, extent) ==
+		    BTRFS_FILE_EXTENT_PREALLOC) {
 			/*
 			 * Explicit hole or prealloc extent, search for delalloc.
 			 * A prealloc extent is treated like a hole.
@@ -4063,7 +4035,7 @@ again:
 	 */
 	pagefault_disable();
 	to->nofault = true;
-	ret = btrfs_dio_read(iocb, to, read);
+	ret = btrfs_dio_rw(iocb, to, read);
 	to->nofault = false;
 	pagefault_enable();
 

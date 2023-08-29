@@ -516,7 +516,11 @@ static int start_power_clamp(void)
 	cpus_read_lock();
 
 	/* prefer BSP */
-	control_cpu = cpumask_first(cpu_online_mask);
+	control_cpu = 0;
+	if (!cpu_online(control_cpu)) {
+		control_cpu = get_cpu();
+		put_cpu();
+	}
 
 	clamping = true;
 	schedule_delayed_work(&poll_pkg_cstate_work, 0);

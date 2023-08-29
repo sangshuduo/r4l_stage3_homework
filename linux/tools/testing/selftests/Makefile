@@ -49,7 +49,6 @@ TARGETS += net
 TARGETS += net/af_unix
 TARGETS += net/forwarding
 TARGETS += net/mptcp
-TARGETS += net/openvswitch
 TARGETS += netfilter
 TARGETS += nsfs
 TARGETS += pidfd

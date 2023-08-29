@@ -478,7 +478,6 @@ depends on (ARCH_QCOM && OF) || COMPILE_TEST
 source "drivers/thermal/qcom/Kconfig"
 endmenu
 
-
 config UNIPHIER_THERMAL
 	tristate "Socionext UniPhier thermal driver"
 	depends on ARCH_UNIPHIER || COMPILE_TEST

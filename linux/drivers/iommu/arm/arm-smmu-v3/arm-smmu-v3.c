@@ -2757,7 +2757,7 @@ static void arm_smmu_get_resv_regions(struct device *dev,
 	int prot = IOMMU_WRITE | IOMMU_NOEXEC | IOMMU_MMIO;
 
 	region = iommu_alloc_resv_region(MSI_IOVA_BASE, MSI_IOVA_LENGTH,
-					 prot, IOMMU_RESV_SW_MSI, GFP_KERNEL);
+					 prot, IOMMU_RESV_SW_MSI);
 	if (!region)
 		return;
 
@@ -3854,9 +3854,7 @@ static int arm_smmu_device_remove(struct platform_device *pdev)
 
 static void arm_smmu_device_shutdown(struct platform_device *pdev)
 {
-	struct arm_smmu_device *smmu = platform_get_drvdata(pdev);
-
-	arm_smmu_device_disable(smmu);
+	arm_smmu_device_remove(pdev);
 }
 
 static const struct of_device_id arm_smmu_of_match[] = {

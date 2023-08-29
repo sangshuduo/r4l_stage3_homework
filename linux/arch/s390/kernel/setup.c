@@ -507,7 +507,6 @@ static void __init setup_lowcore_dat_on(void)
 {
 	struct lowcore *abs_lc;
 	unsigned long flags;
-	int i;
 
 	__ctl_clear_bit(0, 28);
 	S390_lowcore.external_new_psw.mask |= PSW_MASK_DAT;
@@ -522,8 +521,8 @@ static void __init setup_lowcore_dat_on(void)
 	abs_lc = get_abs_lowcore(&flags);
 	abs_lc->restart_flags = RESTART_FLAG_CTLREGS;
 	abs_lc->program_new_psw = S390_lowcore.program_new_psw;
-	for (i = 0; i < 16; i++)
-		abs_lc->cregs_save_area[i] = S390_lowcore.cregs_save_area[i];
+	memcpy(abs_lc->cregs_save_area, S390_lowcore.cregs_save_area,
+	       sizeof(abs_lc->cregs_save_area));
 	put_abs_lowcore(abs_lc, flags);
 }
 

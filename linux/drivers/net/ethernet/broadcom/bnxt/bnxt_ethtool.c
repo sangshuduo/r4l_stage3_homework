@@ -162,7 +162,7 @@ static int bnxt_set_coalesce(struct net_device *dev,
 	}
 
 reset_coalesce:
-	if (test_bit(BNXT_STATE_OPEN, &bp->state)) {
+	if (netif_running(dev)) {
 		if (update_stats) {
 			rc = bnxt_close_nic(bp, true, false);
 			if (!rc)
@@ -3865,7 +3865,7 @@ void bnxt_ethtool_init(struct bnxt *bp)
 		test_info->timeout = HWRM_CMD_TIMEOUT;
 	for (i = 0; i < bp->num_tests; i++) {
 		char *str = test_info->string[i];
-		char *fw_str = resp->test_name[i];
+		char *fw_str = resp->test0_name + i * 32;
 
 		if (i == BNXT_MACLPBK_TEST_IDX) {
 			strcpy(str, "Mac loopback test (offline)");
@@ -3876,9 +3876,14 @@ void bnxt_ethtool_init(struct bnxt *bp)
 		} else if (i == BNXT_IRQ_TEST_IDX) {
 			strcpy(str, "Interrupt_test (offline)");
 		} else {
-			snprintf(str, ETH_GSTRING_LEN, "%s test (%s)",
-				 fw_str, test_info->offline_mask & (1 << i) ?
-					"offline" : "online");
+			strscpy(str, fw_str, ETH_GSTRING_LEN);
+			strncat(str, " test", ETH_GSTRING_LEN - strlen(str));
+			if (test_info->offline_mask & (1 << i))
+				strncat(str, " (offline)",
+					ETH_GSTRING_LEN - strlen(str));
+			else
+				strncat(str, " (online)",
+					ETH_GSTRING_LEN - strlen(str));
 		}
 	}
 

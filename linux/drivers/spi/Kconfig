@@ -278,7 +278,6 @@ config SPI_DESIGNWARE
 	help
 	  general driver for SPI controller core from DesignWare
 
-
 if SPI_DESIGNWARE
 
 config SPI_DW_DMA

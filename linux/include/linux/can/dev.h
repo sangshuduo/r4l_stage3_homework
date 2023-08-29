@@ -85,20 +85,7 @@ struct can_priv {
 	int (*do_get_berr_counter)(const struct net_device *dev,
 				   struct can_berr_counter *bec);
 	int (*do_get_auto_tdcv)(const struct net_device *dev, u32 *tdcv);
-	void (*do_set_node_id)(struct net_device *dev, u32 node_id);
-	void (*do_set_node_id_mask)(struct net_device *dev, u32 node_id_mask);
-#ifdef CONFIG_CAN_LEDS
-	struct led_trigger *tx_led_trig;
-	char tx_led_trig_name[CAN_LED_NAME_SZ];
-	struct led_trigger *rx_led_trig;
-	char rx_led_trig_name[CAN_LED_NAME_SZ];
-	struct led_trigger *rxtx_led_trig;
-	char rxtx_led_trig_name[CAN_LED_NAME_SZ];
-#endif
 };
-
-#define get_can_dlc(i)		(min_t(u8, (i), CAN_MAX_DLC))
-#define get_canfd_dlc(i)	(min_t(u8, (i), CANFD_MAX_DLC))
 
 static inline bool can_tdc_is_enabled(const struct can_priv *priv)
 {
@@ -163,22 +150,6 @@ static inline u32 can_get_static_ctrlmode(struct can_priv *priv)
 static inline bool can_is_canxl_dev_mtu(unsigned int mtu)
 {
 	return (mtu >= CANXL_MIN_MTU && mtu <= CANXL_MAX_MTU);
-}
-
-/* drop skb if it does not contain a valid CAN frame for sending */
-static inline bool can_dev_dropped_skb(struct net_device *dev, struct sk_buff *skb)
-{
-	struct can_priv *priv = netdev_priv(dev);
-
-	if (priv->ctrlmode & CAN_CTRLMODE_LISTENONLY) {
-		netdev_info_once(dev,
-				 "interface in listen only mode, dropping skb\n");
-		kfree_skb(skb);
-		dev->stats.tx_dropped++;
-		return true;
-	}
-
-	return can_dropped_invalid_skb(dev, skb);
 }
 
 void can_setup(struct net_device *dev);

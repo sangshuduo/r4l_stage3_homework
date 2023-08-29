@@ -912,19 +912,6 @@ int vb2_core_streamon(struct vb2_queue *q, unsigned int type);
 int vb2_core_streamoff(struct vb2_queue *q, unsigned int type);
 
 /**
- * find_plane_by_vma() - find plane associated with the given vma
- *
- * @q:          pointer to &struct vb2_queue with videobuf2 queue
- * @vma:        pointer to &struct vm_area_struct with the vma passed
- *              to the mmap file operation handler in the driver.
- * @buffer:     pointer for buffer index to store
- * @plane:      pointer for plane index to store
- * Return: returns zero on success; an error code otherwise.
- */
-int find_plane_by_vma(struct vb2_queue *q, struct vm_area_struct *vma,
-                unsigned int *buffer, unsigned int *plane);
-				
-/**
  * vb2_core_expbuf() - Export a buffer as a file descriptor.
  * @q:		pointer to &struct vb2_queue with videobuf2 queue.
  * @fd:		pointer to the file descriptor associated with DMABUF

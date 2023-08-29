@@ -1991,8 +1991,6 @@ static int default_attr_update(struct amdgpu_device *adev, struct amdgpu_device_
 		case IP_VERSION(9, 4, 2):
 		case IP_VERSION(10, 3, 0):
 		case IP_VERSION(11, 0, 0):
-		case IP_VERSION(11, 0, 1):
-		case IP_VERSION(11, 0, 2):
 			*states = ATTR_STATE_SUPPORTED;
 			break;
 		default:
@@ -3364,10 +3362,10 @@ int amdgpu_pm_sysfs_init(struct amdgpu_device *adev)
 	if (adev->pm.sysfs_initialized)
 		return 0;
 
-	INIT_LIST_HEAD(&adev->pm.pm_attr_list);
-
 	if (adev->pm.dpm_enabled == 0)
 		return 0;
+
+	INIT_LIST_HEAD(&adev->pm.pm_attr_list);
 
 	adev->pm.int_hwmon_dev = hwmon_device_register_with_groups(adev->dev,
 								   DRIVER_NAME, adev,

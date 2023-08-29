@@ -98,14 +98,7 @@ static int mes_v11_0_submit_pkt_and_poll_completion(struct amdgpu_mes *mes,
 	struct amdgpu_device *adev = mes->adev;
 	struct amdgpu_ring *ring = &mes->ring;
 	unsigned long flags;
-	signed long timeout = adev->usec_timeout;
 
-	if (amdgpu_emu_mode) {
-		timeout *= 100;
-	} else if (amdgpu_sriov_vf(adev)) {
-		/* Worst case in sriov where all other 15 VF timeout, each VF needs about 600ms */
-		timeout = 15 * 600 * 1000;
-	}
 	BUG_ON(size % 4 != 0);
 
 	spin_lock_irqsave(&mes->ring_lock, flags);
@@ -125,7 +118,7 @@ static int mes_v11_0_submit_pkt_and_poll_completion(struct amdgpu_mes *mes,
 	DRM_DEBUG("MES msg=%d was emitted\n", x_pkt->header.opcode);
 
 	r = amdgpu_fence_wait_polling(ring, ring->fence_drv.sync_seq,
-		      timeout);
+		      adev->usec_timeout * (amdgpu_emu_mode ? 100 : 1));
 	if (r < 1) {
 		DRM_ERROR("MES failed to response msg=%d\n",
 			  x_pkt->header.opcode);
@@ -192,6 +185,7 @@ static int mes_v11_0_add_hw_queue(struct amdgpu_mes *mes,
 	mes_add_queue_pkt.trap_handler_addr = input->tba_addr;
 	mes_add_queue_pkt.tma_addr = input->tma_addr;
 	mes_add_queue_pkt.is_kfd_process = input->is_kfd_process;
+	mes_add_queue_pkt.trap_en = 1;
 
 	/* For KFD, gds_size is re-used for queue size (needed in MES for AQL queues) */
 	mes_add_queue_pkt.is_aql_queue = input->is_aql_queue;
@@ -1162,42 +1156,6 @@ static int mes_v11_0_sw_fini(void *handle)
 	return 0;
 }
 
-static void mes_v11_0_kiq_dequeue_sched(struct amdgpu_device *adev)
-{
-	uint32_t data;
-	int i;
-
-	mutex_lock(&adev->srbm_mutex);
-	soc21_grbm_select(adev, 3, AMDGPU_MES_SCHED_PIPE, 0, 0);
-
-	/* disable the queue if it's active */
-	if (RREG32_SOC15(GC, 0, regCP_HQD_ACTIVE) & 1) {
-		WREG32_SOC15(GC, 0, regCP_HQD_DEQUEUE_REQUEST, 1);
-		for (i = 0; i < adev->usec_timeout; i++) {
-			if (!(RREG32_SOC15(GC, 0, regCP_HQD_ACTIVE) & 1))
-				break;
-			udelay(1);
-		}
-	}
-	data = RREG32_SOC15(GC, 0, regCP_HQD_PQ_DOORBELL_CONTROL);
-	data = REG_SET_FIELD(data, CP_HQD_PQ_DOORBELL_CONTROL,
-				DOORBELL_EN, 0);
-	data = REG_SET_FIELD(data, CP_HQD_PQ_DOORBELL_CONTROL,
-				DOORBELL_HIT, 1);
-	WREG32_SOC15(GC, 0, regCP_HQD_PQ_DOORBELL_CONTROL, data);
-
-	WREG32_SOC15(GC, 0, regCP_HQD_PQ_DOORBELL_CONTROL, 0);
-
-	WREG32_SOC15(GC, 0, regCP_HQD_PQ_WPTR_LO, 0);
-	WREG32_SOC15(GC, 0, regCP_HQD_PQ_WPTR_HI, 0);
-	WREG32_SOC15(GC, 0, regCP_HQD_PQ_RPTR, 0);
-
-	soc21_grbm_select(adev, 0, 0, 0, 0);
-	mutex_unlock(&adev->srbm_mutex);
-
-	adev->mes.ring.sched.ready = false;
-}
-
 static void mes_v11_0_kiq_setting(struct amdgpu_ring *ring)
 {
 	uint32_t tmp;
@@ -1249,9 +1207,6 @@ failure:
 
 static int mes_v11_0_kiq_hw_fini(struct amdgpu_device *adev)
 {
-	if (adev->mes.ring.sched.ready)
-		mes_v11_0_kiq_dequeue_sched(adev);
-
 	mes_v11_0_enable(adev, false);
 	return 0;
 }
@@ -1307,6 +1262,9 @@ failure:
 
 static int mes_v11_0_hw_fini(void *handle)
 {
+	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+
+	adev->mes.ring.sched.ready = false;
 	return 0;
 }
 
@@ -1338,9 +1296,7 @@ static int mes_v11_0_late_init(void *handle)
 {
 	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
 
-	/* it's only intended for use in mes_self_test case, not for s0ix and reset */
-	if (!amdgpu_in_reset(adev) && !adev->in_s0ix &&
-	    (adev->ip_versions[GC_HWIP][0] != IP_VERSION(11, 0, 3)))
+	if (!amdgpu_in_reset(adev))
 		amdgpu_mes_self_test(adev);
 
 	return 0;

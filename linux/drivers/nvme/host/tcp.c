@@ -301,7 +301,7 @@ static inline void nvme_tcp_advance_req(struct nvme_tcp_request *req,
 	if (!iov_iter_count(&req->iter) &&
 	    req->data_sent < req->data_len) {
 		req->curr_bio = req->curr_bio->bi_next;
-		nvme_tcp_init_iter(req, ITER_SOURCE);
+		nvme_tcp_init_iter(req, WRITE);
 	}
 }
 
@@ -387,7 +387,7 @@ static inline void nvme_tcp_ddgst_update(struct ahash_request *hash,
 {
 	struct scatterlist sg;
 
-	sg_init_table(&sg, 1);
+	sg_init_marker(&sg, 1);
 	sg_set_page(&sg, page, len, off);
 	ahash_request_set_crypt(hash, &sg, NULL, len);
 	crypto_ahash_update(hash);
@@ -781,7 +781,7 @@ static int nvme_tcp_recv_data(struct nvme_tcp_queue *queue, struct sk_buff *skb,
 				nvme_tcp_init_recv_ctx(queue);
 				return -EIO;
 			}
-			nvme_tcp_init_iter(req, ITER_DEST);
+			nvme_tcp_init_iter(req, READ);
 		}
 
 		/* we can read only from what is left in this bio */
@@ -1141,7 +1141,6 @@ static int nvme_tcp_try_send_ddgst(struct nvme_tcp_request *req)
 static int nvme_tcp_try_send(struct nvme_tcp_queue *queue)
 {
 	struct nvme_tcp_request *req;
-	unsigned int noreclaim_flag;
 	int ret = 1;
 
 	if (!queue->request) {
@@ -1151,13 +1150,12 @@ static int nvme_tcp_try_send(struct nvme_tcp_queue *queue)
 	}
 	req = queue->request;
 
-	noreclaim_flag = memalloc_noreclaim_save();
 	if (req->state == NVME_TCP_SEND_CMD_PDU) {
 		ret = nvme_tcp_try_send_cmd_pdu(req);
 		if (ret <= 0)
 			goto done;
 		if (!nvme_tcp_has_inline_data(req))
-			goto out;
+			return ret;
 	}
 
 	if (req->state == NVME_TCP_SEND_H2C_PDU) {
@@ -1183,8 +1181,6 @@ done:
 		nvme_tcp_fail_request(queue->request);
 		nvme_tcp_done_send_req(queue);
 	}
-out:
-	memalloc_noreclaim_restore(noreclaim_flag);
 	return ret;
 }
 
@@ -1300,7 +1296,6 @@ static void nvme_tcp_free_queue(struct nvme_ctrl *nctrl, int qid)
 	struct page *page;
 	struct nvme_tcp_ctrl *ctrl = to_tcp_ctrl(nctrl);
 	struct nvme_tcp_queue *queue = &ctrl->queues[qid];
-	unsigned int noreclaim_flag;
 
 	if (!test_and_clear_bit(NVME_TCP_Q_ALLOCATED, &queue->flags))
 		return;
@@ -1313,11 +1308,7 @@ static void nvme_tcp_free_queue(struct nvme_ctrl *nctrl, int qid)
 		__page_frag_cache_drain(page, queue->pf_cache.pagecnt_bias);
 		queue->pf_cache.va = NULL;
 	}
-
-	noreclaim_flag = memalloc_noreclaim_save();
 	sock_release(queue->sock);
-	memalloc_noreclaim_restore(noreclaim_flag);
-
 	kfree(queue->pdu);
 	mutex_destroy(&queue->send_mutex);
 	mutex_destroy(&queue->queue_lock);
@@ -1867,7 +1858,7 @@ static int nvme_tcp_configure_io_queues(struct nvme_ctrl *ctrl, bool new)
 	if (new) {
 		ret = nvme_alloc_io_tag_set(ctrl, &to_tcp_ctrl(ctrl)->tag_set,
 				&nvme_tcp_mq_ops,
-				ctrl->opts->nr_poll_queues ? HCTX_MAX_TYPES : 2,
+				BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_BLOCKING,
 				sizeof(struct nvme_tcp_request));
 		if (ret)
 			goto out_free_io_queues;
@@ -1942,7 +1933,7 @@ static int nvme_tcp_configure_admin_queue(struct nvme_ctrl *ctrl, bool new)
 	if (new) {
 		error = nvme_alloc_admin_tag_set(ctrl,
 				&to_tcp_ctrl(ctrl)->admin_tag_set,
-				&nvme_tcp_admin_mq_ops,
+				&nvme_tcp_admin_mq_ops, BLK_MQ_F_BLOCKING,
 				sizeof(struct nvme_tcp_request));
 		if (error)
 			goto out_free_queue;
@@ -2523,7 +2514,7 @@ static const struct blk_mq_ops nvme_tcp_admin_mq_ops = {
 static const struct nvme_ctrl_ops nvme_tcp_ctrl_ops = {
 	.name			= "tcp",
 	.module			= THIS_MODULE,
-	.flags			= NVME_F_FABRICS | NVME_F_BLOCKING,
+	.flags			= NVME_F_FABRICS,
 	.reg_read32		= nvmf_reg_read32,
 	.reg_read64		= nvmf_reg_read64,
 	.reg_write32		= nvmf_reg_write32,

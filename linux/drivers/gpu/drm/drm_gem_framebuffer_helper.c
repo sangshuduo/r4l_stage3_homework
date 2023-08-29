@@ -271,7 +271,6 @@ static const struct drm_framebuffer_funcs drm_gem_fb_funcs = {
  * Returns:
  * Pointer to a &drm_framebuffer on success or an error pointer on failure.
  */
-
 struct drm_framebuffer *
 drm_gem_fb_create(struct drm_device *dev, struct drm_file *file,
 		  const struct drm_mode_fb_cmd2 *mode_cmd)

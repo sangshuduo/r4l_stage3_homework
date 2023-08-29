@@ -9,7 +9,6 @@ config SERIAL_8250
 	depends on !S390
 	select SERIAL_CORE
 	select SERIAL_MCTRL_GPIO if GPIOLIB
-	select HAVE_ATOMIC_CONSOLE
 	help
 	  This selects whether you want to include the driver for the standard
 	  serial ports.  The standard answer is Y.  People who might say N
@@ -117,9 +116,9 @@ config SERIAL_8250_CONSOLE
 
 	  If unsure, say N.
 
-config SERIAL_8250_PARISC
+config SERIAL_8250_GSC
 	tristate
-	depends on SERIAL_8250 && PARISC
+	depends on SERIAL_8250 && GSC
 	default SERIAL_8250
 
 config SERIAL_8250_DMA

@@ -356,7 +356,7 @@ void disk_uevent(struct gendisk *disk, enum kobject_action action)
 }
 EXPORT_SYMBOL_GPL(disk_uevent);
 
-int disk_scan_partitions(struct gendisk *disk, fmode_t mode, void *owner)
+int disk_scan_partitions(struct gendisk *disk, fmode_t mode)
 {
 	struct block_device *bdev;
 
@@ -365,9 +365,6 @@ int disk_scan_partitions(struct gendisk *disk, fmode_t mode, void *owner)
 	if (test_bit(GD_SUPPRESS_PART_SCAN, &disk->state))
 		return -EINVAL;
 	if (disk->open_partitions)
-		return -EBUSY;
-	/* Someone else has bdev exclusively open? */
-	if (disk->part0->bd_holder && disk->part0->bd_holder != owner)
 		return -EBUSY;
 
 	set_bit(GD_NEED_PART_SCAN, &disk->state);
@@ -413,10 +410,9 @@ int __must_check device_add_disk(struct device *parent, struct gendisk *disk,
 	 * Otherwise just allocate the device numbers for both the whole device
 	 * and all partitions from the extended dev_t space.
 	 */
-	ret = -EINVAL;
 	if (disk->major) {
 		if (WARN_ON(!disk->minors))
-			goto out_exit_elevator;
+			return -EINVAL;
 
 		if (disk->minors > DISK_MAX_PARTS) {
 			pr_err("block: can't allocate more than %d partitions\n",
@@ -424,14 +420,14 @@ int __must_check device_add_disk(struct device *parent, struct gendisk *disk,
 			disk->minors = DISK_MAX_PARTS;
 		}
 		if (disk->first_minor + disk->minors > MINORMASK + 1)
-			goto out_exit_elevator;
+			return -EINVAL;
 	} else {
 		if (WARN_ON(disk->minors))
-			goto out_exit_elevator;
+			return -EINVAL;
 
 		ret = blk_alloc_ext_minor();
 		if (ret < 0)
-			goto out_exit_elevator;
+			return ret;
 		disk->major = BLOCK_EXT_MAJOR;
 		disk->first_minor = ret;
 	}
@@ -503,7 +499,7 @@ int __must_check device_add_disk(struct device *parent, struct gendisk *disk,
 
 		bdev_add(disk->part0, ddev->devt);
 		if (get_capacity(disk))
-			disk_scan_partitions(disk, FMODE_READ, NULL);
+			disk_scan_partitions(disk, FMODE_READ);
 
 		/*
 		 * Announce the disk and partitions after all partitions are
@@ -530,10 +526,8 @@ out_unregister_bdi:
 		bdi_unregister(disk->bdi);
 out_unregister_queue:
 	blk_unregister_queue(disk);
-	rq_qos_exit(disk->queue);
 out_put_slave_dir:
 	kobject_put(disk->slave_dir);
-	disk->slave_dir = NULL;
 out_put_holder_dir:
 	kobject_put(disk->part0->bd_holder_dir);
 out_del_integrity:
@@ -546,9 +540,6 @@ out_device_del:
 out_free_ext_minor:
 	if (disk->major == BLOCK_EXT_MAJOR)
 		blk_free_ext_minor(disk->first_minor);
-out_exit_elevator:
-	if (disk->queue->elevator)
-		elevator_exit(disk->queue);
 	return ret;
 }
 EXPORT_SYMBOL(device_add_disk);
@@ -633,7 +624,6 @@ void del_gendisk(struct gendisk *disk)
 
 	kobject_put(disk->part0->bd_holder_dir);
 	kobject_put(disk->slave_dir);
-	disk->slave_dir = NULL;
 
 	part_stat_set_all(disk->part0, 0);
 	disk->part0->bd_stamp = 0;

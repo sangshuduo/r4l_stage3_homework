@@ -90,10 +90,13 @@ static int sparx5_tc_setup_qdisc_ets(struct net_device *ndev,
 			}
 		}
 
-		return sparx5_tc_ets_add(port, params);
+		sparx5_tc_ets_add(port, params);
+		break;
 	case TC_ETS_DESTROY:
 
-		return sparx5_tc_ets_del(port);
+		sparx5_tc_ets_del(port);
+
+		break;
 	case TC_ETS_GRAFT:
 		return -EOPNOTSUPP;
 

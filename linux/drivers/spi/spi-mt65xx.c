@@ -551,17 +551,14 @@ static void mtk_spi_enable_transfer(struct spi_master *master)
 	writel(cmd, mdata->base + SPI_CMD_REG);
 }
 
-static int mtk_spi_get_mult_delta(struct mtk_spi *mdata, u32 xfer_len)
+static int mtk_spi_get_mult_delta(u32 xfer_len)
 {
-	u32 mult_delta = 0;
+	u32 mult_delta;
 
-	if (mdata->dev_comp->ipm_design) {
-		if (xfer_len > MTK_SPI_IPM_PACKET_SIZE)
-			mult_delta = xfer_len % MTK_SPI_IPM_PACKET_SIZE;
-	} else {
-		if (xfer_len > MTK_SPI_PACKET_SIZE)
-			mult_delta = xfer_len % MTK_SPI_PACKET_SIZE;
-	}
+	if (xfer_len > MTK_SPI_PACKET_SIZE)
+		mult_delta = xfer_len % MTK_SPI_PACKET_SIZE;
+	else
+		mult_delta = 0;
 
 	return mult_delta;
 }
@@ -573,22 +570,22 @@ static void mtk_spi_update_mdata_len(struct spi_master *master)
 
 	if (mdata->tx_sgl_len && mdata->rx_sgl_len) {
 		if (mdata->tx_sgl_len > mdata->rx_sgl_len) {
-			mult_delta = mtk_spi_get_mult_delta(mdata, mdata->rx_sgl_len);
+			mult_delta = mtk_spi_get_mult_delta(mdata->rx_sgl_len);
 			mdata->xfer_len = mdata->rx_sgl_len - mult_delta;
 			mdata->rx_sgl_len = mult_delta;
 			mdata->tx_sgl_len -= mdata->xfer_len;
 		} else {
-			mult_delta = mtk_spi_get_mult_delta(mdata, mdata->tx_sgl_len);
+			mult_delta = mtk_spi_get_mult_delta(mdata->tx_sgl_len);
 			mdata->xfer_len = mdata->tx_sgl_len - mult_delta;
 			mdata->tx_sgl_len = mult_delta;
 			mdata->rx_sgl_len -= mdata->xfer_len;
 		}
 	} else if (mdata->tx_sgl_len) {
-		mult_delta = mtk_spi_get_mult_delta(mdata, mdata->tx_sgl_len);
+		mult_delta = mtk_spi_get_mult_delta(mdata->tx_sgl_len);
 		mdata->xfer_len = mdata->tx_sgl_len - mult_delta;
 		mdata->tx_sgl_len = mult_delta;
 	} else if (mdata->rx_sgl_len) {
-		mult_delta = mtk_spi_get_mult_delta(mdata, mdata->rx_sgl_len);
+		mult_delta = mtk_spi_get_mult_delta(mdata->rx_sgl_len);
 		mdata->xfer_len = mdata->rx_sgl_len - mult_delta;
 		mdata->rx_sgl_len = mult_delta;
 	}
@@ -1273,11 +1270,8 @@ static int mtk_spi_remove(struct platform_device *pdev)
 {
 	struct spi_master *master = platform_get_drvdata(pdev);
 	struct mtk_spi *mdata = spi_master_get_devdata(master);
-	int ret;
 
-	ret = pm_runtime_resume_and_get(&pdev->dev);
-	if (ret < 0)
-		return ret;
+	pm_runtime_disable(&pdev->dev);
 
 	mtk_spi_reset(mdata);
 
@@ -1285,9 +1279,6 @@ static int mtk_spi_remove(struct platform_device *pdev)
 		clk_unprepare(mdata->spi_clk);
 		clk_unprepare(mdata->spi_hclk);
 	}
-
-	pm_runtime_put_noidle(&pdev->dev);
-	pm_runtime_disable(&pdev->dev);
 
 	return 0;
 }

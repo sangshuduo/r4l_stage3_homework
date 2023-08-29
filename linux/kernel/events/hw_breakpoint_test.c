@@ -295,11 +295,11 @@ static int test_init(struct kunit *test)
 {
 	/* Most test cases want 2 distinct CPUs. */
 	if (num_online_cpus() < 2)
-		kunit_skip(test, "not enough cpus");
+		return -EINVAL;
 
 	/* Want the system to not use breakpoints elsewhere. */
 	if (hw_breakpoint_is_used())
-		kunit_skip(test, "hw breakpoint already in use");
+		return -EBUSY;
 
 	return 0;
 }

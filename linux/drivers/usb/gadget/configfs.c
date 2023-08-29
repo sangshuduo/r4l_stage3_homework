@@ -392,7 +392,6 @@ static void gadget_info_attr_release(struct config_item *item)
 	WARN_ON(!list_empty(&gi->string_list));
 	WARN_ON(!list_empty(&gi->available_func));
 	kfree(gi->composite.gadget_driver.function);
-	kfree(gi->composite.gadget_driver.driver.name);
 	kfree(gi);
 }
 
@@ -1572,6 +1571,7 @@ static const struct usb_gadget_driver configfs_driver_template = {
 	.max_speed	= USB_SPEED_SUPER_PLUS,
 	.driver = {
 		.owner          = THIS_MODULE,
+		.name		= "configfs-gadget",
 	},
 	.match_existing_only = 1,
 };
@@ -1622,21 +1622,13 @@ static struct config_group *gadgets_make(
 
 	gi->composite.gadget_driver = configfs_driver_template;
 
-	gi->composite.gadget_driver.driver.name = kasprintf(GFP_KERNEL,
-							    "configfs-gadget.%s", name);
-	if (!gi->composite.gadget_driver.driver.name)
-		goto err;
-
 	gi->composite.gadget_driver.function = kstrdup(name, GFP_KERNEL);
 	gi->composite.name = gi->composite.gadget_driver.function;
 
 	if (!gi->composite.gadget_driver.function)
-		goto out_free_driver_name;
+		goto err;
 
 	return &gi->group;
-
-out_free_driver_name:
-	kfree(gi->composite.gadget_driver.driver.name);
 err:
 	kfree(gi);
 	return ERR_PTR(-ENOMEM);

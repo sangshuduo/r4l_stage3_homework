@@ -54,7 +54,6 @@
 #include <linux/highmem.h>
 #include <linux/pgtable.h>
 #include <linux/buildid.h>
-#include <linux/task_work.h>
 
 #include "internal.h"
 
@@ -2277,27 +2276,11 @@ event_sched_out(struct perf_event *event,
 	event->pmu->del(event, 0);
 	event->oncpu = -1;
 
-	if (event->pending_disable) {
-		event->pending_disable = 0;
+	if (READ_ONCE(event->pending_disable) >= 0) {
+		WRITE_ONCE(event->pending_disable, -1);
 		perf_cgroup_event_disable(event, ctx);
 		state = PERF_EVENT_STATE_OFF;
 	}
-
-	if (event->pending_sigtrap) {
-		bool dec = true;
-
-		event->pending_sigtrap = 0;
-		if (state != PERF_EVENT_STATE_OFF &&
-		    !event->pending_work) {
-			event->pending_work = 1;
-			dec = false;
-			WARN_ON_ONCE(!atomic_long_inc_not_zero(&event->refcount));
-			task_work_add(current, &event->pending_task, TWA_RESUME);
-		}
-		if (dec)
-			local_dec(&event->ctx->nr_pending);
-	}
-
 	perf_event_set_state(event, state);
 
 	if (!is_software_event(event))
@@ -2337,7 +2320,6 @@ group_sched_out(struct perf_event *group_event,
 
 #define DETACH_GROUP	0x01UL
 #define DETACH_CHILD	0x02UL
-#define DETACH_DEAD	0x04UL
 
 /*
  * Cross CPU call to remove a performance event
@@ -2358,20 +2340,12 @@ __perf_remove_from_context(struct perf_event *event,
 		update_cgrp_time_from_cpuctx(cpuctx, false);
 	}
 
-	/*
-	 * Ensure event_sched_out() switches to OFF, at the very least
-	 * this avoids raising perf_pending_task() at this time.
-	 */
-	if (flags & DETACH_DEAD)
-		event->pending_disable = 1;
 	event_sched_out(event, cpuctx, ctx);
 	if (flags & DETACH_GROUP)
 		perf_group_detach(event);
 	if (flags & DETACH_CHILD)
 		perf_child_detach(event);
 	list_del_event(event, ctx);
-	if (flags & DETACH_DEAD)
-		event->state = PERF_EVENT_STATE_DEAD;
 
 	if (!ctx->nr_events && ctx->is_active) {
 		if (ctx == &cpuctx->ctx)
@@ -2458,7 +2432,7 @@ static void __perf_event_disable(struct perf_event *event,
  * hold the top-level event's child_mutex, so any descendant that
  * goes to exit will block in perf_event_exit_event().
  *
- * When called from perf_pending_irq it's OK because event->ctx
+ * When called from perf_pending_event it's OK because event->ctx
  * is the current context on this CPU and preemption is disabled,
  * hence we can't get into perf_event_task_sched_out for this context.
  */
@@ -2497,8 +2471,9 @@ EXPORT_SYMBOL_GPL(perf_event_disable);
 
 void perf_event_disable_inatomic(struct perf_event *event)
 {
-	event->pending_disable = 1;
-	irq_work_queue(&event->pending_irq);
+	WRITE_ONCE(event->pending_disable, smp_processor_id());
+	/* can fail, see perf_pending_event_disable() */
+	irq_work_queue(&event->pending);
 }
 
 #define MAX_INTERRUPTS (~0ULL)
@@ -3453,22 +3428,10 @@ static void perf_event_context_sched_out(struct task_struct *task, int ctxn,
 		raw_spin_lock_nested(&next_ctx->lock, SINGLE_DEPTH_NESTING);
 		if (context_equiv(ctx, next_ctx)) {
 
-			perf_pmu_disable(pmu);
-
-			/* PMIs are disabled; ctx->nr_pending is stable. */
-			if (local_read(&ctx->nr_pending) ||
-			    local_read(&next_ctx->nr_pending)) {
-				/*
-				 * Must not swap out ctx when there's pending
-				 * events that rely on the ctx->task relation.
-				 */
-				raw_spin_unlock(&next_ctx->lock);
-				rcu_read_unlock();
-				goto inside_switch;
-			}
-
 			WRITE_ONCE(ctx->task, next);
 			WRITE_ONCE(next_ctx->task, task);
+
+			perf_pmu_disable(pmu);
 
 			if (cpuctx->sched_cb_usage && pmu->sched_task)
 				pmu->sched_task(ctx, false);
@@ -3510,7 +3473,6 @@ unlock:
 		raw_spin_lock(&ctx->lock);
 		perf_pmu_disable(pmu);
 
-inside_switch:
 		if (cpuctx->sched_cb_usage && pmu->sched_task)
 			pmu->sched_task(ctx, false);
 		task_ctx_sched_out(cpuctx, ctx, EVENT_ALL);
@@ -4977,7 +4939,7 @@ static void perf_addr_filters_splice(struct perf_event *event,
 
 static void _free_event(struct perf_event *event)
 {
-	irq_work_sync(&event->pending_irq);
+	irq_work_sync(&event->pending);
 
 	unaccount_event(event);
 
@@ -5131,7 +5093,9 @@ int perf_event_release_kernel(struct perf_event *event)
 
 	ctx = perf_event_ctx_lock(event);
 	WARN_ON_ONCE(ctx->parent_ctx);
+	perf_remove_from_context(event, DETACH_GROUP);
 
+	raw_spin_lock_irq(&ctx->lock);
 	/*
 	 * Mark this event as STATE_DEAD, there is no external reference to it
 	 * anymore.
@@ -5143,7 +5107,8 @@ int perf_event_release_kernel(struct perf_event *event)
 	 * Thus this guarantees that we will in fact observe and kill _ALL_
 	 * child events.
 	 */
-	perf_remove_from_context(event, DETACH_GROUP|DETACH_DEAD);
+	event->state = PERF_EVENT_STATE_DEAD;
+	raw_spin_unlock_irq(&ctx->lock);
 
 	perf_event_ctx_unlock(event, ctx);
 
@@ -6474,8 +6439,7 @@ static void perf_sigtrap(struct perf_event *event)
 		return;
 
 	/*
-	 * Both perf_pending_task() and perf_pending_irq() can race with the
-	 * task exiting.
+	 * perf_pending_event() can race with the task exiting.
 	 */
 	if (current->flags & PF_EXITING)
 		return;
@@ -6484,33 +6448,23 @@ static void perf_sigtrap(struct perf_event *event)
 		      event->attr.type, event->attr.sig_data);
 }
 
-/*
- * Deliver the pending work in-event-context or follow the context.
- */
-static void __perf_pending_irq(struct perf_event *event)
+static void perf_pending_event_disable(struct perf_event *event)
 {
-	int cpu = READ_ONCE(event->oncpu);
+	int cpu = READ_ONCE(event->pending_disable);
 
-	/*
-	 * If the event isn't running; we done. event_sched_out() will have
-	 * taken care of things.
-	 */
 	if (cpu < 0)
 		return;
 
-	/*
-	 * Yay, we hit home and are in the context of the event.
-	 */
 	if (cpu == smp_processor_id()) {
-		if (event->pending_sigtrap) {
-			event->pending_sigtrap = 0;
+		WRITE_ONCE(event->pending_disable, -1);
+
+		if (event->attr.sigtrap) {
 			perf_sigtrap(event);
-			local_dec(&event->ctx->nr_pending);
+			atomic_set_release(&event->event_limit, 1); /* rearm event */
+			return;
 		}
-		if (event->pending_disable) {
-			event->pending_disable = 0;
-			perf_event_disable_local(event);
-		}
+
+		perf_event_disable_local(event);
 		return;
 	}
 
@@ -6530,62 +6484,33 @@ static void __perf_pending_irq(struct perf_event *event)
 	 *				  irq_work_queue(); // FAILS
 	 *
 	 *  irq_work_run()
-	 *    perf_pending_irq()
+	 *    perf_pending_event()
 	 *
 	 * But the event runs on CPU-B and wants disabling there.
 	 */
-	irq_work_queue_on(&event->pending_irq, cpu);
+	irq_work_queue_on(&event->pending, cpu);
 }
 
-static void perf_pending_irq(struct irq_work *entry)
+static void perf_pending_event(struct irq_work *entry)
 {
-	struct perf_event *event = container_of(entry, struct perf_event, pending_irq);
+	struct perf_event *event = container_of(entry, struct perf_event, pending);
 	int rctx;
 
+	rctx = perf_swevent_get_recursion_context();
 	/*
 	 * If we 'fail' here, that's OK, it means recursion is already disabled
 	 * and we won't recurse 'further'.
 	 */
-	rctx = perf_swevent_get_recursion_context();
 
-	/*
-	 * The wakeup isn't bound to the context of the event -- it can happen
-	 * irrespective of where the event is.
-	 */
+	perf_pending_event_disable(event);
+
 	if (event->pending_wakeup) {
 		event->pending_wakeup = 0;
 		perf_event_wakeup(event);
 	}
 
-	__perf_pending_irq(event);
-
 	if (rctx >= 0)
 		perf_swevent_put_recursion_context(rctx);
-}
-
-static void perf_pending_task(struct callback_head *head)
-{
-	struct perf_event *event = container_of(head, struct perf_event, pending_task);
-	int rctx;
-
-	/*
-	 * If we 'fail' here, that's OK, it means recursion is already disabled
-	 * and we won't recurse 'further'.
-	 */
-	preempt_disable_notrace();
-	rctx = perf_swevent_get_recursion_context();
-
-	if (event->pending_work) {
-		event->pending_work = 0;
-		perf_sigtrap(event);
-		local_dec(&event->ctx->nr_pending);
-	}
-
-	if (rctx >= 0)
-		perf_swevent_put_recursion_context(rctx);
-	preempt_enable_notrace();
-
-	put_event(event);
 }
 
 #ifdef CONFIG_GUEST_PERF_EVENTS
@@ -9039,7 +8964,7 @@ static void perf_event_bpf_emit_ksymbols(struct bpf_prog *prog,
 				PERF_RECORD_KSYMBOL_TYPE_BPF,
 				(u64)(unsigned long)subprog->bpf_func,
 				subprog->jited_len, unregister,
-				subprog->aux->ksym.name);
+				prog->aux->ksym.name);
 		}
 	}
 }
@@ -9282,26 +9207,13 @@ int perf_event_account_interrupt(struct perf_event *event)
 	return __perf_event_account_interrupt(event, 1);
 }
 
-static inline bool sample_is_allowed(struct perf_event *event, struct pt_regs *regs)
-{
-	/*
-	 * Due to interrupt latency (AKA "skid"), we may enter the
-	 * kernel before taking an overflow, even if the PMU is only
-	 * counting user events.
-	 */
-	if (event->attr.exclude_kernel && !user_mode(regs))
-		return false;
-
-	return true;
-}
-
 /*
  * Generic event overflow handling, sampling.
  */
 
 static int __perf_event_overflow(struct perf_event *event,
-				 int throttle, struct perf_sample_data *data,
-				 struct pt_regs *regs)
+				   int throttle, struct perf_sample_data *data,
+				   struct pt_regs *regs)
 {
 	int events = atomic_read(&event->event_limit);
 	int ret = 0;
@@ -9324,59 +9236,24 @@ static int __perf_event_overflow(struct perf_event *event,
 	if (events && atomic_dec_and_test(&event->event_limit)) {
 		ret = 1;
 		event->pending_kill = POLL_HUP;
+		event->pending_addr = data->addr;
+
 		perf_event_disable_inatomic(event);
-	}
-
-	if (event->attr.sigtrap) {
-		/*
-		 * The desired behaviour of sigtrap vs invalid samples is a bit
-		 * tricky; on the one hand, one should not loose the SIGTRAP if
-		 * it is the first event, on the other hand, we should also not
-		 * trigger the WARN or override the data address.
-		 */
-		bool valid_sample = sample_is_allowed(event, regs);
-		unsigned int pending_id = 1;
-
-		if (regs)
-			pending_id = hash32_ptr((void *)instruction_pointer(regs)) ?: 1;
-		if (!event->pending_sigtrap) {
-			event->pending_sigtrap = pending_id;
-			local_inc(&event->ctx->nr_pending);
-		} else if (event->attr.exclude_kernel && valid_sample) {
-			/*
-			 * Should not be able to return to user space without
-			 * consuming pending_sigtrap; with exceptions:
-			 *
-			 *  1. Where !exclude_kernel, events can overflow again
-			 *     in the kernel without returning to user space.
-			 *
-			 *  2. Events that can overflow again before the IRQ-
-			 *     work without user space progress (e.g. hrtimer).
-			 *     To approximate progress (with false negatives),
-			 *     check 32-bit hash of the current IP.
-			 */
-			WARN_ON_ONCE(event->pending_sigtrap != pending_id);
-		}
-
-		event->pending_addr = 0;
-		if (valid_sample && (data->sample_flags & PERF_SAMPLE_ADDR))
-			event->pending_addr = data->addr;
-		irq_work_queue(&event->pending_irq);
 	}
 
 	READ_ONCE(event->overflow_handler)(event, data, regs);
 
 	if (*perf_event_fasync(event) && event->pending_kill) {
 		event->pending_wakeup = 1;
-		irq_work_queue(&event->pending_irq);
+		irq_work_queue(&event->pending);
 	}
 
 	return ret;
 }
 
 int perf_event_overflow(struct perf_event *event,
-			struct perf_sample_data *data,
-			struct pt_regs *regs)
+			  struct perf_sample_data *data,
+			  struct pt_regs *regs)
 {
 	return __perf_event_overflow(event, 1, data, regs);
 }
@@ -9891,7 +9768,6 @@ void perf_tp_event(u16 event_type, u64 count, void *record, int entry_size,
 
 	perf_sample_data_init(&data, 0, 0);
 	data.raw = &raw;
-	data.sample_flags |= PERF_SAMPLE_RAW;
 
 	perf_trace_buf_update(record, event_type);
 
@@ -11193,15 +11069,13 @@ static int pmu_dev_alloc(struct pmu *pmu)
 
 	pmu->dev->groups = pmu->attr_groups;
 	device_initialize(pmu->dev);
-
-	dev_set_drvdata(pmu->dev, pmu);
-	pmu->dev->bus = &pmu_bus;
-	pmu->dev->release = pmu_dev_release;
-
 	ret = dev_set_name(pmu->dev, "%s", pmu->name);
 	if (ret)
 		goto free_dev;
 
+	dev_set_drvdata(pmu->dev, pmu);
+	pmu->dev->bus = &pmu_bus;
+	pmu->dev->release = pmu_dev_release;
 	ret = device_add(pmu->dev);
 	if (ret)
 		goto free_dev;
@@ -11696,8 +11570,8 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 
 
 	init_waitqueue_head(&event->waitq);
-	init_irq_work(&event->pending_irq, perf_pending_irq);
-	init_task_work(&event->pending_task, perf_pending_task);
+	event->pending_disable = -1;
+	init_irq_work(&event->pending, perf_pending_event);
 
 	mutex_init(&event->mmap_mutex);
 	raw_spin_lock_init(&event->addr_filters.lock);
@@ -11718,6 +11592,9 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 
 	if (parent_event)
 		event->event_caps = parent_event->event_caps;
+
+	if (event->attr.sigtrap)
+		atomic_set(&event->event_limit, 1);
 
 	if (task) {
 		event->attach_state = PERF_ATTACH_TASK;
@@ -12231,12 +12108,12 @@ SYSCALL_DEFINE5(perf_event_open,
 	if (flags & ~PERF_FLAG_ALL)
 		return -EINVAL;
 
-	err = perf_copy_attr(attr_uptr, &attr);
+	/* Do we allow access to perf_event_open(2) ? */
+	err = security_perf_event_open(&attr, PERF_SECURITY_OPEN);
 	if (err)
 		return err;
 
-	/* Do we allow access to perf_event_open(2) ? */
-	err = security_perf_event_open(&attr, PERF_SECURITY_OPEN);
+	err = perf_copy_attr(attr_uptr, &attr);
 	if (err)
 		return err;
 

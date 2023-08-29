@@ -292,11 +292,24 @@ static int tcp_v6_connect(struct sock *sk, struct sockaddr *uaddr,
 	tcp_death_row = &sock_net(sk)->ipv4.tcp_death_row;
 
 	if (!saddr) {
-		saddr = &fl6.saddr;
+		struct inet_bind_hashbucket *prev_addr_hashbucket = NULL;
+		struct in6_addr prev_v6_rcv_saddr;
 
-		err = inet_bhash2_update_saddr(sk, saddr, AF_INET6);
-		if (err)
-			goto failure;
+		if (icsk->icsk_bind2_hash) {
+			prev_addr_hashbucket = inet_bhashfn_portaddr(tcp_death_row->hashinfo,
+								     sk, net, inet->inet_num);
+			prev_v6_rcv_saddr = sk->sk_v6_rcv_saddr;
+		}
+		saddr = &fl6.saddr;
+		sk->sk_v6_rcv_saddr = *saddr;
+
+		if (prev_addr_hashbucket) {
+			err = inet_bhash2_update_saddr(prev_addr_hashbucket, sk);
+			if (err) {
+				sk->sk_v6_rcv_saddr = prev_v6_rcv_saddr;
+				goto failure;
+			}
+		}
 	}
 
 	/* set the source address */
@@ -346,7 +359,6 @@ static int tcp_v6_connect(struct sock *sk, struct sockaddr *uaddr,
 
 late_failure:
 	tcp_set_state(sk, TCP_CLOSE);
-	inet_bhash2_reset_saddr(sk);
 failure:
 	inet->inet_dport = 0;
 	sk->sk_route_caps = 0;

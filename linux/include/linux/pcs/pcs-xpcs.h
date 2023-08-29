@@ -21,39 +21,11 @@
 
 struct xpcs_id;
 
-struct mdio_xpcs_args {
-	__ETHTOOL_DECLARE_LINK_MODE_MASK(supported);
-	struct mii_bus *bus;
-	int addr;
-};
-
 struct dw_xpcs {
 	struct mdio_device *mdiodev;
 	const struct xpcs_id *id;
 	struct phylink_pcs pcs;
 };
-
-struct mdio_xpcs_ops {
-	int (*validate)(struct mdio_xpcs_args *xpcs,
-			unsigned long *supported,
-			struct phylink_link_state *state);
-	int (*config)(struct mdio_xpcs_args *xpcs,
-		      const struct phylink_link_state *state);
-	int (*get_state)(struct mdio_xpcs_args *xpcs,
-			 struct phylink_link_state *state);
-	int (*link_up)(struct mdio_xpcs_args *xpcs, int speed,
-		       phy_interface_t interface);
-	int (*probe)(struct mdio_xpcs_args *xpcs, phy_interface_t interface);
-};
-
-#if IS_ENABLED(CONFIG_PCS_XPCS)
-struct mdio_xpcs_ops *mdio_xpcs_get_ops(void);
-#else
-static inline struct mdio_xpcs_ops *mdio_xpcs_get_ops(void)
-{
-	return NULL;
-}
-#endif
 
 int xpcs_get_an_mode(struct dw_xpcs *xpcs, phy_interface_t interface);
 void xpcs_link_up(struct phylink_pcs *pcs, unsigned int mode,

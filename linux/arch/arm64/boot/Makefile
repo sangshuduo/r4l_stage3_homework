@@ -16,25 +16,7 @@
 
 OBJCOPYFLAGS_Image :=-O binary -R .note -R .note.gnu.build-id -R .comment -S
 
-targets := Image Image.bz2 Image.gz Image.lz4 Image.lzma Image.lzo Image.zst Image.itb
-# yi.zhang add itb configure
-quiet_cmd_mkitb = MKITB   $@
-      cmd_mkitb = mkimage -f $< $@ > /dev/null 2>&1
-
-quiet_cmd_copy_itb = COPY    $@
-	  cmd_copy_itb = cp $< $@ $(objtree)
-
-#OBJCOPYFLAGS_Image_a.raw := -b 0 -i 4 --interleave-width 2 -I binary
-#OBJCOPYFLAGS_Image_b.raw := -b 2 -i 4 --interleave-width 2 -I binary
-
-
-#$(obj)/Image_a.raw: $(obj)/Image.itb FORCE
-#	$(call if_changed,objcopy)
-#	$(call if_changed,copy_itb)
-
-#$(obj)/Image_b.raw: $(obj)/Image.itb FORCE
-#	$(call if_changed,objcopy)
-#	$(call if_changed,copy_itb)
+targets := Image Image.bz2 Image.gz Image.lz4 Image.lzma Image.lzo Image.zst
 
 $(obj)/Image: vmlinux FORCE
 	$(call if_changed,objcopy)
@@ -56,14 +38,6 @@ $(obj)/Image.lzo: $(obj)/Image FORCE
 
 $(obj)/Image.zst: $(obj)/Image FORCE
 	$(call if_changed,zstd)
-
-install:
-	$(CONFIG_SHELL) $(srctree)/$(src)/install.sh $(KERNELRELEASE) \
-	$(obj)/Image System.map "$(INSTALL_PATH)"
-
-zinstall:
-	$(CONFIG_SHELL) $(srctree)/$(src)/install.sh $(KERNELRELEASE) \
-	$(obj)/Image.gz System.map "$(INSTALL_PATH)"
 
 EFI_ZBOOT_PAYLOAD	:= Image
 EFI_ZBOOT_BFD_TARGET	:= elf64-littleaarch64

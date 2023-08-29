@@ -804,11 +804,6 @@ void rust_helper_ndelay(unsigned long nsecs) {
 }
 EXPORT_SYMBOL_GPL(rust_helper_ndelay);
 
-void rust_helper_netif_tx_disable(struct net_device *dev) {
-  netif_tx_disable(dev);
-}
-EXPORT_SYMBOL_GPL(rust_helper_netif_tx_disable);
-
 /*
  * We use `bindgen`'s `--size_t-is-usize` option to bind the C `size_t` type
  * as the Rust `usize` type, so we can use it in contexts where Rust

@@ -853,8 +853,7 @@ static inline bool blk_mq_add_to_batch(struct request *req,
 				       struct io_comp_batch *iob, int ioerror,
 				       void (*complete)(struct io_comp_batch *))
 {
-	if (!iob || (req->rq_flags & RQF_ELV) || ioerror ||
-			(req->end_io && !blk_rq_is_passthrough(req)))
+	if (!iob || (req->rq_flags & RQF_ELV) || ioerror)
 		return false;
 
 	if (!iob->complete)

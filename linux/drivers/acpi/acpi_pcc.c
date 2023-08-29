@@ -27,7 +27,7 @@
  * Arbitrary retries in case the remote processor is slow to respond
  * to PCC commands
  */
-#define PCC_CMD_WAIT_RETRIES_NUM	500ULL
+#define PCC_CMD_WAIT_RETRIES_NUM	500
 
 struct pcc_data {
 	struct pcc_mbox_chan *pcc_chan;

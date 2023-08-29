@@ -217,7 +217,6 @@ static void phy_mdio_device_free(struct mdio_device *mdiodev)
 
 static void phy_device_release(struct device *dev)
 {
-	fwnode_handle_put(dev->fwnode);
 	kfree(to_phy_device(dev));
 }
 
@@ -874,17 +873,19 @@ static int get_phy_c22_id(struct mii_bus *bus, int addr, u32 *phy_id)
  */
 int fwnode_get_phy_id(struct fwnode_handle *fwnode, u32 *phy_id)
 {
-	struct property *prop;
 	unsigned int upper, lower;
 	const char *cp;
+	int ret;
 
-	of_property_for_each_string(to_of_node(fwnode), "compatible", prop, cp) {
-		if (sscanf(cp, "ethernet-phy-id%4x.%4x", &upper, &lower) == 2) {
-			*phy_id = ((upper & GENMASK(15, 0)) << 16) | (lower & GENMASK(15, 0));
-			return 0;
-		}
-	}
-	return -EINVAL;
+	ret = fwnode_property_read_string(fwnode, "compatible", &cp);
+	if (ret)
+		return ret;
+
+	if (sscanf(cp, "ethernet-phy-id%4x.%4x", &upper, &lower) != 2)
+		return -EINVAL;
+
+	*phy_id = ((upper & GENMASK(15, 0)) << 16) | (lower & GENMASK(15, 0));
+	return 0;
 }
 EXPORT_SYMBOL(fwnode_get_phy_id);
 
@@ -1519,7 +1520,6 @@ error:
 
 error_module_put:
 	module_put(d->driver->owner);
-	d->driver = NULL;
 error_put_device:
 	put_device(d);
 	if (ndev_owner != bus->owner)

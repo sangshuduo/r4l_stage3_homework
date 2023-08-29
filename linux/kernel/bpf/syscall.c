@@ -1958,7 +1958,7 @@ static void bpf_audit_prog(const struct bpf_prog *prog, unsigned int op)
 		return;
 	if (audit_enabled == AUDIT_OFF)
 		return;
-	if (!in_irq() && !irqs_disabled())
+	if (op == BPF_AUDIT_LOAD)
 		ctx = audit_context();
 	ab = audit_log_start(ctx, GFP_ATOMIC, AUDIT_BPF);
 	if (unlikely(!ab))
@@ -2053,7 +2053,6 @@ static void bpf_prog_put_deferred(struct work_struct *work)
 	prog = aux->prog;
 	perf_event_bpf_event(prog, PERF_BPF_EVENT_PROG_UNLOAD, 0);
 	bpf_audit_prog(prog, BPF_AUDIT_UNLOAD);
-	bpf_prog_free_id(prog, true);
 	__bpf_prog_put_noref(prog, true);
 }
 
@@ -2062,6 +2061,9 @@ static void __bpf_prog_put(struct bpf_prog *prog, bool do_idr_lock)
 	struct bpf_prog_aux *aux = prog->aux;
 
 	if (atomic64_dec_and_test(&aux->refcnt)) {
+		/* bpf_prog_free_id() must be called first */
+		bpf_prog_free_id(prog, do_idr_lock);
+
 		if (in_irq() || irqs_disabled()) {
 			INIT_WORK(&aux->work, bpf_prog_put_deferred);
 			schedule_work(&aux->work);
@@ -2115,11 +2117,11 @@ static void bpf_prog_get_stats(const struct bpf_prog *prog,
 
 		st = per_cpu_ptr(prog->stats, cpu);
 		do {
-			start = u64_stats_fetch_begin(&st->syncp);
+			start = u64_stats_fetch_begin_irq(&st->syncp);
 			tnsecs = u64_stats_read(&st->nsecs);
 			tcnt = u64_stats_read(&st->cnt);
 			tmisses = u64_stats_read(&st->misses);
-		} while (u64_stats_fetch_retry(&st->syncp, start));
+		} while (u64_stats_fetch_retry_irq(&st->syncp, start));
 		nsecs += tnsecs;
 		cnt += tcnt;
 		misses += tmisses;
@@ -3502,9 +3504,9 @@ static int bpf_prog_attach(const union bpf_attr *attr)
 	case BPF_PROG_TYPE_LSM:
 		if (ptype == BPF_PROG_TYPE_LSM &&
 		    prog->expected_attach_type != BPF_LSM_CGROUP)
-			ret = -EINVAL;
-		else
-			ret = cgroup_bpf_prog_attach(attr, ptype, prog);
+			return -EINVAL;
+
+		ret = cgroup_bpf_prog_attach(attr, ptype, prog);
 		break;
 	default:
 		ret = -EINVAL;

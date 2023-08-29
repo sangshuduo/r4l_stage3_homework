@@ -2489,8 +2489,9 @@ int nfs_unlink(struct inode *dir, struct dentry *dentry)
 		spin_unlock(&dentry->d_lock);
 		goto out;
 	}
-	/* old devname */
-	kfree(dentry->d_fsdata);
+	if (dentry->d_fsdata)
+		/* old devname */
+		kfree(dentry->d_fsdata);
 	dentry->d_fsdata = NFS_FSDATA_BLOCKED;
 
 	spin_unlock(&dentry->d_lock);

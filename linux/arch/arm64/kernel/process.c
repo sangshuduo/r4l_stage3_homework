@@ -114,18 +114,6 @@ void machine_power_off(void)
 	do_kernel_power_off();
 }
 
-void bst_a1000_sw_reset(void)
-{
-    u32 reg;
-    void __iomem  *base;
-    base = ioremap(0x70035008, 4);
-    reg = readl(base);
-    reg &= ~(1<<0);
-    writel(reg, base);
-    iounmap(base);
-    while(1);
-}
-
 /*
  * Restart requires that the secondary CPUs stop performing any activity
  * while the primary CPU resets the system. Systems with multiple CPUs must
@@ -150,8 +138,6 @@ void machine_restart(char *cmd)
 
 	/* Now call the architecture specific reboot code. */
 	do_kernel_restart(cmd);
-
-	bst_a1000_sw_reset();
 
 	/*
 	 * Whoops - the architecture was unable to reboot.

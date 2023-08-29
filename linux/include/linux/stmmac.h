@@ -85,10 +85,6 @@ struct stmmac_mdio_bus_data {
 	int *irqs;
 	int probed_phy_irq;
 	bool needs_reset;
-#ifdef CONFIG_OF
-	int reset_gpio, active_low;
-	u32 delays[3];
-#endif
 };
 
 struct stmmac_dma_cfg {
@@ -102,7 +98,6 @@ struct stmmac_dma_cfg {
 	bool eame;
 	bool multi_msi_en;
 	bool dche;
-	u32 dma_int_mode;
 };
 
 #define AXI_BLEN	7
@@ -276,6 +271,5 @@ struct plat_stmmacenet_data {
 	int msi_tx_base_vec;
 	bool use_phy_wol;
 	bool sph_disable;
-	u32 fix_safety;
 };
 #endif

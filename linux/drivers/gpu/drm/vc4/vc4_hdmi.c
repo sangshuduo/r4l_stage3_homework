@@ -349,40 +349,27 @@ static int vc4_hdmi_reset_link(struct drm_connector *connector,
 	if (!crtc_state->active)
 		return 0;
 
-	mutex_lock(&vc4_hdmi->mutex);
-
-	if (!vc4_hdmi_supports_scrambling(encoder)) {
-		mutex_unlock(&vc4_hdmi->mutex);
+	if (!vc4_hdmi_supports_scrambling(encoder))
 		return 0;
-	}
 
 	scrambling_needed = vc4_hdmi_mode_needs_scrambling(&vc4_hdmi->saved_adjusted_mode,
 							   vc4_hdmi->output_bpc,
 							   vc4_hdmi->output_format);
-	if (!scrambling_needed) {
-		mutex_unlock(&vc4_hdmi->mutex);
+	if (!scrambling_needed)
 		return 0;
-	}
 
 	if (conn_state->commit &&
-	    !try_wait_for_completion(&conn_state->commit->hw_done)) {
-		mutex_unlock(&vc4_hdmi->mutex);
+	    !try_wait_for_completion(&conn_state->commit->hw_done))
 		return 0;
-	}
 
 	ret = drm_scdc_readb(connector->ddc, SCDC_TMDS_CONFIG, &config);
 	if (ret < 0) {
 		drm_err(drm, "Failed to read TMDS config: %d\n", ret);
-		mutex_unlock(&vc4_hdmi->mutex);
 		return 0;
 	}
 
-	if (!!(config & SCDC_SCRAMBLING_ENABLE) == scrambling_needed) {
-		mutex_unlock(&vc4_hdmi->mutex);
+	if (!!(config & SCDC_SCRAMBLING_ENABLE) == scrambling_needed)
 		return 0;
-	}
-
-	mutex_unlock(&vc4_hdmi->mutex);
 
 	/*
 	 * HDMI 2.0 says that one should not send scrambled data
@@ -410,8 +397,9 @@ static void vc4_hdmi_handle_hotplug(struct vc4_hdmi *vc4_hdmi,
 	 * .adap_enable, which leads to that funtion being called with
 	 * our mutex held.
 	 *
-	 * A similar situation occurs with vc4_hdmi_reset_link() that
-	 * will call into our KMS hooks if the scrambling was enabled.
+	 * A similar situation occurs with
+	 * drm_atomic_helper_connector_hdmi_reset_link() that will call
+	 * into our KMS hooks if the scrambling was enabled.
 	 *
 	 * Concurrency isn't an issue at the moment since we don't share
 	 * any state with any of the other frameworks so we can ignore
@@ -3009,8 +2997,7 @@ static int vc4_hdmi_cec_init(struct vc4_hdmi *vc4_hdmi)
 	}
 
 	vc4_hdmi->cec_adap = cec_allocate_adapter(&vc4_hdmi_cec_adap_ops,
-						  vc4_hdmi,
-						  vc4_hdmi->variant->card_name,
+						  vc4_hdmi, "vc4",
 						  CEC_CAP_DEFAULTS |
 						  CEC_CAP_CONNECTOR_INFO, 1);
 	ret = PTR_ERR_OR_ZERO(vc4_hdmi->cec_adap);
@@ -3173,15 +3160,8 @@ static int vc4_hdmi_init_resources(struct drm_device *drm,
 		DRM_ERROR("Failed to get HDMI state machine clock\n");
 		return PTR_ERR(vc4_hdmi->hsm_clock);
 	}
-
 	vc4_hdmi->audio_clock = vc4_hdmi->hsm_clock;
 	vc4_hdmi->cec_clock = vc4_hdmi->hsm_clock;
-
-	vc4_hdmi->hsm_rpm_clock = devm_clk_get(dev, "hdmi");
-	if (IS_ERR(vc4_hdmi->hsm_rpm_clock)) {
-		DRM_ERROR("Failed to get HDMI state machine clock\n");
-		return PTR_ERR(vc4_hdmi->hsm_rpm_clock);
-	}
 
 	return 0;
 }
@@ -3265,12 +3245,6 @@ static int vc5_hdmi_init_resources(struct drm_device *drm,
 		return PTR_ERR(vc4_hdmi->hsm_clock);
 	}
 
-	vc4_hdmi->hsm_rpm_clock = devm_clk_get(dev, "hdmi");
-	if (IS_ERR(vc4_hdmi->hsm_rpm_clock)) {
-		DRM_ERROR("Failed to get HDMI state machine clock\n");
-		return PTR_ERR(vc4_hdmi->hsm_rpm_clock);
-	}
-
 	vc4_hdmi->pixel_bvb_clock = devm_clk_get(dev, "bvb");
 	if (IS_ERR(vc4_hdmi->pixel_bvb_clock)) {
 		DRM_ERROR("Failed to get pixel bvb clock\n");
@@ -3334,7 +3308,7 @@ static int vc4_hdmi_runtime_suspend(struct device *dev)
 {
 	struct vc4_hdmi *vc4_hdmi = dev_get_drvdata(dev);
 
-	clk_disable_unprepare(vc4_hdmi->hsm_rpm_clock);
+	clk_disable_unprepare(vc4_hdmi->hsm_clock);
 
 	return 0;
 }
@@ -3344,36 +3318,11 @@ static int vc4_hdmi_runtime_resume(struct device *dev)
 	struct vc4_hdmi *vc4_hdmi = dev_get_drvdata(dev);
 	unsigned long __maybe_unused flags;
 	u32 __maybe_unused value;
-	unsigned long rate;
 	int ret;
 
-	/*
-	 * The HSM clock is in the HDMI power domain, so we need to set
-	 * its frequency while the power domain is active so that it
-	 * keeps its rate.
-	 */
-	ret = clk_set_min_rate(vc4_hdmi->hsm_rpm_clock, HSM_MIN_CLOCK_FREQ);
+	ret = clk_prepare_enable(vc4_hdmi->hsm_clock);
 	if (ret)
 		return ret;
-
-	ret = clk_prepare_enable(vc4_hdmi->hsm_rpm_clock);
-	if (ret)
-		return ret;
-
-	/*
-	 * Whenever the RaspberryPi boots without an HDMI monitor
-	 * plugged in, the firmware won't have initialized the HSM clock
-	 * rate and it will be reported as 0.
-	 *
-	 * If we try to access a register of the controller in such a
-	 * case, it will lead to a silent CPU stall. Let's make sure we
-	 * prevent such a case.
-	 */
-	rate = clk_get_rate(vc4_hdmi->hsm_rpm_clock);
-	if (!rate) {
-		ret = -EINVAL;
-		goto err_disable_clk;
-	}
 
 	if (vc4_hdmi->variant->reset)
 		vc4_hdmi->variant->reset(vc4_hdmi);
@@ -3396,10 +3345,6 @@ static int vc4_hdmi_runtime_resume(struct device *dev)
 #endif
 
 	return 0;
-
-err_disable_clk:
-	clk_disable_unprepare(vc4_hdmi->hsm_clock);
-	return ret;
 }
 
 static void vc4_hdmi_put_ddc_device(void *ptr)

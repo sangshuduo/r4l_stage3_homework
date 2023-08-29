@@ -22,8 +22,6 @@ static const struct nla_policy can_policy[IFLA_CAN_MAX + 1] = {
 	[IFLA_CAN_TERMINATION] = { .type = NLA_U16 },
 	[IFLA_CAN_TDC] = { .type = NLA_NESTED },
 	[IFLA_CAN_CTRLMODE_EXT] = { .type = NLA_NESTED },
-	[IFLA_CAN_NODE_ID] = { .type = NLA_U32 },
-	[IFLA_CAN_NODE_ID_MASK] = { .type = NLA_U32 },
 };
 
 static const struct nla_policy can_tdc_policy[IFLA_CAN_TDC_MAX + 1] = {
@@ -351,30 +349,6 @@ static int can_changelink(struct net_device *dev, struct nlattr *tb[],
 			return err;
 
 		priv->termination = termval;
-	}
-
-	if (data[IFLA_CAN_NODE_ID]) {
-		/* Do not allow changing bittiming while running */
-		if (dev->flags & IFF_UP)
-			return -EBUSY;
-
-		if (priv->do_set_node_id) {
-			/* set the node id */
-			priv->do_set_node_id(
-				dev, nla_get_u32(data[IFLA_CAN_NODE_ID]));
-		}
-	}
-
-	if (data[IFLA_CAN_NODE_ID_MASK]) {
-		/* Do not allow changing bittiming while running */
-		if (dev->flags & IFF_UP)
-			return -EBUSY;
-
-		if (priv->do_set_node_id_mask) {
-			/* set the node id mask */
-			priv->do_set_node_id_mask(
-				dev, nla_get_u32(data[IFLA_CAN_NODE_ID_MASK]));
-		}
 	}
 
 	return 0;

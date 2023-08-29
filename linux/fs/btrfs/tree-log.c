@@ -3011,6 +3011,7 @@ int btrfs_sync_log(struct btrfs_trans_handle *trans,
 		ret = 0;
 	if (ret) {
 		blk_finish_plug(&plug);
+		btrfs_abort_transaction(trans, ret);
 		btrfs_set_log_full_commit(trans);
 		mutex_unlock(&root->log_mutex);
 		goto out;
@@ -3075,12 +3076,15 @@ int btrfs_sync_log(struct btrfs_trans_handle *trans,
 
 		blk_finish_plug(&plug);
 		btrfs_set_log_full_commit(trans);
-		if (ret != -ENOSPC)
-			btrfs_err(fs_info,
-				  "failed to update log for root %llu ret %d",
-				  root->root_key.objectid, ret);
+
+		if (ret != -ENOSPC) {
+			btrfs_abort_transaction(trans, ret);
+			mutex_unlock(&log_root_tree->log_mutex);
+			goto out;
+		}
 		btrfs_wait_tree_log_extents(log, mark);
 		mutex_unlock(&log_root_tree->log_mutex);
+		ret = BTRFS_LOG_FORCE_COMMIT;
 		goto out;
 	}
 
@@ -3139,6 +3143,7 @@ int btrfs_sync_log(struct btrfs_trans_handle *trans,
 		goto out_wake_log_root;
 	} else if (ret) {
 		btrfs_set_log_full_commit(trans);
+		btrfs_abort_transaction(trans, ret);
 		mutex_unlock(&log_root_tree->log_mutex);
 		goto out_wake_log_root;
 	}
@@ -3607,19 +3612,17 @@ static noinline int insert_dir_log_key(struct btrfs_trans_handle *trans,
 }
 
 static int flush_dir_items_batch(struct btrfs_trans_handle *trans,
-				 struct btrfs_inode *inode,
+				 struct btrfs_root *log,
 				 struct extent_buffer *src,
 				 struct btrfs_path *dst_path,
 				 int start_slot,
 				 int count)
 {
-	struct btrfs_root *log = inode->root->log_root;
 	char *ins_data = NULL;
 	struct btrfs_item_batch batch;
 	struct extent_buffer *dst;
 	unsigned long src_offset;
 	unsigned long dst_offset;
-	u64 last_index;
 	struct btrfs_key key;
 	u32 item_size;
 	int ret;
@@ -3677,19 +3680,6 @@ static int flush_dir_items_batch(struct btrfs_trans_handle *trans,
 	src_offset = btrfs_item_ptr_offset(src, start_slot + count - 1);
 	copy_extent_buffer(dst, src, dst_offset, src_offset, batch.total_data_size);
 	btrfs_release_path(dst_path);
-
-	last_index = batch.keys[count - 1].offset;
-	ASSERT(last_index > inode->last_dir_index_offset);
-
-	/*
-	 * If for some unexpected reason the last item's index is not greater
-	 * than the last index we logged, warn and return an error to fallback
-	 * to a transaction commit.
-	 */
-	if (WARN_ON(last_index <= inode->last_dir_index_offset))
-		ret = -EUCLEAN;
-	else
-		inode->last_dir_index_offset = last_index;
 out:
 	kfree(ins_data);
 
@@ -3704,29 +3694,15 @@ static int process_dir_items_leaf(struct btrfs_trans_handle *trans,
 				  u64 *last_old_dentry_offset)
 {
 	struct btrfs_root *log = inode->root->log_root;
-	struct extent_buffer *src;
-	const int nritems = btrfs_header_nritems(path->nodes[0]);
+	struct extent_buffer *src = path->nodes[0];
+	const int nritems = btrfs_header_nritems(src);
 	const u64 ino = btrfs_ino(inode);
 	bool last_found = false;
 	int batch_start = 0;
 	int batch_size = 0;
 	int i;
 
-	/*
-	 * We need to clone the leaf, release the read lock on it, and use the
-	 * clone before modifying the log tree. See the comment at copy_items()
-	 * about why we need to do this.
-	 */
-	src = btrfs_clone_extent_buffer(path->nodes[0]);
-	if (!src)
-		return -ENOMEM;
-
-	i = path->slots[0];
-	btrfs_release_path(path);
-	path->nodes[0] = src;
-	path->slots[0] = i;
-
-	for (; i < nritems; i++) {
+	for (i = path->slots[0]; i < nritems; i++) {
 		struct btrfs_dir_item *di;
 		struct btrfs_key key;
 		int ret;
@@ -3739,6 +3715,7 @@ static int process_dir_items_leaf(struct btrfs_trans_handle *trans,
 		}
 
 		di = btrfs_item_ptr(src, i, struct btrfs_dir_item);
+		ctx->last_dir_item_offset = key.offset;
 
 		/*
 		 * Skip ranges of items that consist only of dir item keys created
@@ -3801,7 +3778,7 @@ static int process_dir_items_leaf(struct btrfs_trans_handle *trans,
 	if (batch_size > 0) {
 		int ret;
 
-		ret = flush_dir_items_batch(trans, inode, src, dst_path,
+		ret = flush_dir_items_batch(trans, log, src, dst_path,
 					    batch_start, batch_size);
 		if (ret < 0)
 			return ret;
@@ -3866,10 +3843,7 @@ static noinline int log_dir_items(struct btrfs_trans_handle *trans,
 					      path->slots[0]);
 			if (tmp.type == BTRFS_DIR_INDEX_KEY)
 				last_old_dentry_offset = tmp.offset;
-		} else if (ret < 0) {
-			err = ret;
 		}
-
 		goto done;
 	}
 
@@ -3889,34 +3863,19 @@ static noinline int log_dir_items(struct btrfs_trans_handle *trans,
 		 */
 		if (tmp.type == BTRFS_DIR_INDEX_KEY)
 			last_old_dentry_offset = tmp.offset;
-	} else if (ret < 0) {
-		err = ret;
-		goto done;
 	}
-
 	btrfs_release_path(path);
 
 	/*
-	 * Find the first key from this transaction again or the one we were at
-	 * in the loop below in case we had to reschedule. We may be logging the
-	 * directory without holding its VFS lock, which happen when logging new
-	 * dentries (through log_new_dir_dentries()) or in some cases when we
-	 * need to log the parent directory of an inode. This means a dir index
-	 * key might be deleted from the inode's root, and therefore we may not
-	 * find it anymore. If we can't find it, just move to the next key. We
-	 * can not bail out and ignore, because if we do that we will simply
-	 * not log dir index keys that come after the one that was just deleted
-	 * and we can end up logging a dir index range that ends at (u64)-1
-	 * (@last_offset is initialized to that), resulting in removing dir
-	 * entries we should not remove at log replay time.
+	 * Find the first key from this transaction again.  See the note for
+	 * log_new_dir_dentries, if we're logging a directory recursively we
+	 * won't be holding its i_mutex, which means we can modify the directory
+	 * while we're logging it.  If we remove an entry between our first
+	 * search and this search we'll not find the key again and can just
+	 * bail.
 	 */
 search:
 	ret = btrfs_search_slot(NULL, root, &min_key, path, 0, 0);
-	if (ret > 0)
-		ret = btrfs_next_item(root, path);
-	if (ret < 0)
-		err = ret;
-	/* If ret is 1, there are no more keys in the inode's root. */
 	if (ret != 0)
 		goto done;
 
@@ -4089,6 +4048,7 @@ static noinline int log_directory_changes(struct btrfs_trans_handle *trans,
 
 	min_key = BTRFS_DIR_START_INDEX;
 	max_key = 0;
+	ctx->last_dir_item_offset = inode->last_dir_index_offset;
 
 	while (1) {
 		ret = log_dir_items(trans, inode, path, dst_path,
@@ -4099,6 +4059,8 @@ static noinline int log_directory_changes(struct btrfs_trans_handle *trans,
 			break;
 		min_key = max_key + 1;
 	}
+
+	inode->last_dir_index_offset = ctx->last_dir_item_offset;
 
 	return 0;
 }
@@ -4341,7 +4303,7 @@ static noinline int copy_items(struct btrfs_trans_handle *trans,
 {
 	struct btrfs_root *log = inode->root->log_root;
 	struct btrfs_file_extent_item *extent;
-	struct extent_buffer *src;
+	struct extent_buffer *src = src_path->nodes[0];
 	int ret = 0;
 	struct btrfs_key *ins_keys;
 	u32 *ins_sizes;
@@ -4351,43 +4313,6 @@ static noinline int copy_items(struct btrfs_trans_handle *trans,
 	int dst_index;
 	const bool skip_csum = (inode->flags & BTRFS_INODE_NODATASUM);
 	const u64 i_size = i_size_read(&inode->vfs_inode);
-
-	/*
-	 * To keep lockdep happy and avoid deadlocks, clone the source leaf and
-	 * use the clone. This is because otherwise we would be changing the log
-	 * tree, to insert items from the subvolume tree or insert csum items,
-	 * while holding a read lock on a leaf from the subvolume tree, which
-	 * creates a nasty lock dependency when COWing log tree nodes/leaves:
-	 *
-	 * 1) Modifying the log tree triggers an extent buffer allocation while
-	 *    holding a write lock on a parent extent buffer from the log tree.
-	 *    Allocating the pages for an extent buffer, or the extent buffer
-	 *    struct, can trigger inode eviction and finally the inode eviction
-	 *    will trigger a release/remove of a delayed node, which requires
-	 *    taking the delayed node's mutex;
-	 *
-	 * 2) Allocating a metadata extent for a log tree can trigger the async
-	 *    reclaim thread and make us wait for it to release enough space and
-	 *    unblock our reservation ticket. The reclaim thread can start
-	 *    flushing delayed items, and that in turn results in the need to
-	 *    lock delayed node mutexes and in the need to write lock extent
-	 *    buffers of a subvolume tree - all this while holding a write lock
-	 *    on the parent extent buffer in the log tree.
-	 *
-	 * So one task in scenario 1) running in parallel with another task in
-	 * scenario 2) could lead to a deadlock, one wanting to lock a delayed
-	 * node mutex while having a read lock on a leaf from the subvolume,
-	 * while the other is holding the delayed node's mutex and wants to
-	 * write lock the same subvolume leaf for flushing delayed items.
-	 */
-	src = btrfs_clone_extent_buffer(src_path->nodes[0]);
-	if (!src)
-		return -ENOMEM;
-
-	i = src_path->slots[0];
-	btrfs_release_path(src_path);
-	src_path->nodes[0] = src;
-	src_path->slots[0] = i;
 
 	ins_data = kmalloc(nr * sizeof(struct btrfs_key) +
 			   nr * sizeof(u32), GFP_NOFS);
@@ -5632,10 +5557,8 @@ static int add_conflicting_inode(struct btrfs_trans_handle *trans,
 	 * LOG_INODE_EXISTS mode) and slow down other fsyncs or transaction
 	 * commits.
 	 */
-	if (ctx->num_conflict_inodes >= MAX_CONFLICT_INODES) {
-		btrfs_set_log_full_commit(trans);
+	if (ctx->num_conflict_inodes >= MAX_CONFLICT_INODES)
 		return BTRFS_LOG_FORCE_COMMIT;
-	}
 
 	inode = btrfs_iget(root->fs_info->sb, ino, root);
 	/*

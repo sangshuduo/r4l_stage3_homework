@@ -355,10 +355,8 @@ static int __init exar_wdt_register(struct wdt_priv *priv, const int idx)
 						    &priv->wdt_res, 1,
 						    priv, sizeof(*priv));
 	if (IS_ERR(n->pdev)) {
-		int err = PTR_ERR(n->pdev);
-
 		kfree(n);
-		return err;
+		return PTR_ERR(n->pdev);
 	}
 
 	list_add_tail(&n->list, &pdev_list);

@@ -210,7 +210,7 @@ struct drm_framebuffer {
 	 * This is used by the GEM framebuffer helpers, see e.g.
 	 * drm_gem_fb_create().
 	 */
-	struct drm_gem_object *obj[4];
+	struct drm_gem_object *obj[DRM_FORMAT_MAX_PLANES];
 };
 
 #define obj_to_fb(x) container_of(x, struct drm_framebuffer, base)

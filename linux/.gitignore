@@ -53,8 +53,6 @@
 Module.symvers
 modules.order
 
-.vscode
-
 #
 # Top-level generic files
 #
@@ -102,6 +100,9 @@ modules.order
 !.gitignore
 !.mailmap
 !.rustfmt.toml
+
+# XXX: Only for GitHub CI -- do not commit into mainline
+!.github
 
 #
 # Generated include files

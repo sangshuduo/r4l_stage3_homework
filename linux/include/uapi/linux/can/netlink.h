@@ -104,14 +104,6 @@ struct can_ctrlmode {
 #define CAN_CTRLMODE_TDC_AUTO		0x200	/* CAN transiver automatically calculates TDCV */
 #define CAN_CTRLMODE_TDC_MANUAL		0x400	/* TDCV is manually set up by user */
 
-/* BST add new ctrlmode */
-#define CAN_CTRLMODE_BST_CAN_NODE       0x100 /* CAN node or CANFD node control */
-#define CAN_CTRLMODE_BST_FILTER_ALL     0x200 /* filter all pkt control */
-#define CAN_CTRLMODE_BST_SELF_TEST      0x400 /* self test mode control */
-#define CAN_CTRLMODE_BST_DMA_ENABLE     0x800 /* dma mode enable control */
-#define CAN_CTRLMODE_BST_ERR_INJECT     0x1000/* err inject control */
-#define CAN_CTRLMODE_BST_ARB_LOST_TEST  0x2000/* arb lost test control */
-
 /*
  * CAN device statistics
  */
@@ -146,8 +138,7 @@ enum {
 	IFLA_CAN_BITRATE_MAX,
 	IFLA_CAN_TDC,
 	IFLA_CAN_CTRLMODE_EXT,
-	IFLA_CAN_NODE_ID,
-	IFLA_CAN_NODE_ID_MASK,
+
 	/* add new constants above here */
 	__IFLA_CAN_MAX,
 	IFLA_CAN_MAX = __IFLA_CAN_MAX - 1

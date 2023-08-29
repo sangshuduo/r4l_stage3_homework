@@ -649,7 +649,7 @@ static int record__pushfn(struct mmap *map, void *to, void *bf, size_t size)
 static volatile int signr = -1;
 static volatile int child_finished;
 #ifdef HAVE_EVENTFD_SUPPORT
-static volatile int done_fd = -1;
+static int done_fd = -1;
 #endif
 
 static void sig_handler(int sig)
@@ -661,24 +661,19 @@ static void sig_handler(int sig)
 
 	done = 1;
 #ifdef HAVE_EVENTFD_SUPPORT
-	if (done_fd >= 0) {
-		u64 tmp = 1;
-		int orig_errno = errno;
-
-		/*
-		 * It is possible for this signal handler to run after done is
-		 * checked in the main loop, but before the perf counter fds are
-		 * polled. If this happens, the poll() will continue to wait
-		 * even though done is set, and will only break out if either
-		 * another signal is received, or the counters are ready for
-		 * read. To ensure the poll() doesn't sleep when done is set,
-		 * use an eventfd (done_fd) to wake up the poll().
-		 */
-		if (write(done_fd, &tmp, sizeof(tmp)) < 0)
-			pr_err("failed to signal wakeup fd, error: %m\n");
-
-		errno = orig_errno;
-	}
+{
+	u64 tmp = 1;
+	/*
+	 * It is possible for this signal handler to run after done is checked
+	 * in the main loop, but before the perf counter fds are polled. If this
+	 * happens, the poll() will continue to wait even though done is set,
+	 * and will only break out if either another signal is received, or the
+	 * counters are ready for read. To ensure the poll() doesn't sleep when
+	 * done is set, use an eventfd (done_fd) to wake up the poll().
+	 */
+	if (write(done_fd, &tmp, sizeof(tmp)) < 0)
+		pr_err("failed to signal wakeup fd, error: %m\n");
+}
 #endif // HAVE_EVENTFD_SUPPORT
 }
 
@@ -2839,12 +2834,8 @@ out_free_threads:
 
 out_delete_session:
 #ifdef HAVE_EVENTFD_SUPPORT
-	if (done_fd >= 0) {
-		fd = done_fd;
-		done_fd = -1;
-
-		close(fd);
-	}
+	if (done_fd >= 0)
+		close(done_fd);
 #endif
 	zstd_fini(&session->zstd_data);
 	perf_session__delete(session);
@@ -3388,7 +3379,7 @@ static struct option __record_options[] = {
 		     &record_parse_callchain_opt),
 	OPT_INCR('v', "verbose", &verbose,
 		    "be more verbose (show counter open errors, etc)"),
-	OPT_BOOLEAN('q', "quiet", &quiet, "don't print any warnings or messages"),
+	OPT_BOOLEAN('q', "quiet", &quiet, "don't print any message"),
 	OPT_BOOLEAN('s', "stat", &record.opts.inherit_stat,
 		    "per thread counts"),
 	OPT_BOOLEAN('d', "data", &record.opts.sample_address, "Record the sample addresses"),

@@ -259,12 +259,6 @@ impl net::DeviceOperations for NetDevice {
         stats.set_tx_bytes(0);
         stats.set_tx_packets(0);
     }
-    fn get_drvinfo(
-        dev: &net::Device,
-        data: &NetDevicePrvData,
-        drvinfo: *mut bindings::ethtool_drvinfo,
-    ) {
-    }
 }
 
 // since the ownership limitation, We can't use NetDevicePrvData as C code, so we need to define a new type here. 

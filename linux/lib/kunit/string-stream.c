@@ -23,10 +23,8 @@ static struct string_stream_fragment *alloc_string_stream_fragment(
 		return ERR_PTR(-ENOMEM);
 
 	frag->fragment = kunit_kmalloc(test, len, gfp);
-	if (!frag->fragment) {
-		kunit_kfree(test, frag);
+	if (!frag->fragment)
 		return ERR_PTR(-ENOMEM);
-	}
 
 	return frag;
 }
@@ -58,8 +56,8 @@ int string_stream_vadd(struct string_stream *stream,
 	frag_container = alloc_string_stream_fragment(stream->test,
 						      len,
 						      stream->gfp);
-	if (IS_ERR(frag_container))
-		return PTR_ERR(frag_container);
+	if (!frag_container)
+		return -ENOMEM;
 
 	len = vsnprintf(frag_container->fragment, len, fmt, args);
 	spin_lock(&stream->lock);

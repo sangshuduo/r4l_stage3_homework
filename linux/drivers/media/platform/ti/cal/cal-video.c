@@ -708,7 +708,7 @@ static int cal_start_streaming(struct vb2_queue *vq, unsigned int count)
 	dma_addr_t addr;
 	int ret;
 
-	ret = video_device_pipeline_alloc_start(&ctx->vdev);
+	ret = media_pipeline_start(&ctx->vdev.entity, &ctx->phy->pipe);
 	if (ret < 0) {
 		ctx_err(ctx, "Failed to start media pipeline: %d\n", ret);
 		goto error_release_buffers;
@@ -761,7 +761,7 @@ error_stop:
 	cal_ctx_unprepare(ctx);
 
 error_pipeline:
-	video_device_pipeline_stop(&ctx->vdev);
+	media_pipeline_stop(&ctx->vdev.entity);
 error_release_buffers:
 	cal_release_buffers(ctx, VB2_BUF_STATE_QUEUED);
 
@@ -782,7 +782,7 @@ static void cal_stop_streaming(struct vb2_queue *vq)
 
 	cal_release_buffers(ctx, VB2_BUF_STATE_ERROR);
 
-	video_device_pipeline_stop(&ctx->vdev);
+	media_pipeline_stop(&ctx->vdev.entity);
 }
 
 static const struct vb2_ops cal_video_qops = {

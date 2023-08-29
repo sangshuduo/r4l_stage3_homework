@@ -7,13 +7,10 @@ ccflags-$(CONFIG_SPI_DEBUG) := -DDEBUG
 
 # small core, mostly translating board-specific
 # config declarations into driver model code
-
 obj-$(CONFIG_SPI_MASTER)		+= spi.o
 obj-$(CONFIG_SPI_MEM)			+= spi-mem.o
-obj-$(CONFIG_SPI_SPIDEV)		+= spidev.o
-obj-$(CONFIG_SPI_DESIGNWARE)		+= spi-dw.o
-
 obj-$(CONFIG_SPI_MUX)			+= spi-mux.o
+obj-$(CONFIG_SPI_SPIDEV)		+= spidev.o
 obj-$(CONFIG_SPI_LOOPBACK_TEST)		+= spi-loopback-test.o
 
 # SPI master controller drivers (bus)
@@ -43,6 +40,7 @@ obj-$(CONFIG_SPI_CLPS711X)		+= spi-clps711x.o
 obj-$(CONFIG_SPI_COLDFIRE_QSPI)		+= spi-coldfire-qspi.o
 obj-$(CONFIG_SPI_DAVINCI)		+= spi-davinci.o
 obj-$(CONFIG_SPI_DLN2)			+= spi-dln2.o
+obj-$(CONFIG_SPI_DESIGNWARE)		+= spi-dw.o
 spi-dw-y				:= spi-dw-core.o
 spi-dw-$(CONFIG_SPI_DW_DMA)		+= spi-dw-dma.o
 obj-$(CONFIG_SPI_DW_BT1)		+= spi-dw-bt1.o

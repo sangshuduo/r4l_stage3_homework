@@ -532,24 +532,15 @@ _ASM_NOKPROBE_SYMBOL(interrupt_return_\srr\()_kernel)
 	 * Returning to soft-disabled context.
 	 * Check if a MUST_HARD_MASK interrupt has become pending, in which
 	 * case we need to disable MSR[EE] in the return context.
-	 *
-	 * The MSR[EE] check catches among other things the short incoherency
-	 * in hard_irq_disable() between clearing MSR[EE] and setting
-	 * PACA_IRQ_HARD_DIS.
 	 */
 	ld	r12,_MSR(r1)
 	andi.	r10,r12,MSR_EE
 	beq	.Lfast_kernel_interrupt_return_\srr\() // EE already disabled
 	lbz	r11,PACAIRQHAPPENED(r13)
 	andi.	r10,r11,PACA_IRQ_MUST_HARD_MASK
-	bne	1f // HARD_MASK is pending
-	// No HARD_MASK pending, clear possible HARD_DIS set by interrupt
-	andi.	r11,r11,(~PACA_IRQ_HARD_DIS)@l
-	stb	r11,PACAIRQHAPPENED(r13)
-	b	.Lfast_kernel_interrupt_return_\srr\()
+	beq	.Lfast_kernel_interrupt_return_\srr\() // No HARD_MASK pending
 
-
-1:	/* Must clear MSR_EE from _MSR */
+	/* Must clear MSR_EE from _MSR */
 #ifdef CONFIG_PPC_BOOK3S
 	li	r10,0
 	/* Clear valid before changing _MSR */

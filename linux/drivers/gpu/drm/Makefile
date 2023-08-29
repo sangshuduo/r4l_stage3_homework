@@ -19,18 +19,7 @@ drm-y       :=	drm_aperture.o drm_auth.o drm_cache.o \
 		drm_dumb_buffers.o drm_mode_config.o drm_vblank.o \
 		drm_syncobj.o drm_lease.o drm_writeback.o drm_client.o \
 		drm_client_modeset.o drm_atomic_uapi.o \
-		drm_managed.o drm_vblank_work.o \
-		drm_bridge_connector.o drm_crtc_helper.o \
-		drm_encoder_slave.o drm_flip_work.o \
-		drm_probe_helper.o \
-		drm_plane_helper.o drm_atomic_helper.o \
-		drm_kms_helper_common.o \
-		drm_simple_kms_helper.o drm_modeset_helper.o \
-		drm_gem_atomic_helper.o \
-		drm_gem_framebuffer_helper.o \
-		drm_atomic_state_helper.o drm_damage_helper.o \
-		drm_format_helper.o drm_self_refresh_helper.o drm_rect.o
-
+		drm_managed.o drm_vblank_work.o
 drm-$(CONFIG_DRM_LEGACY) += drm_agpsupport.o drm_bufs.o drm_context.o drm_dma.o \
 			    drm_hashtab.o drm_irq.o drm_legacy_misc.o drm_lock.o \
 			    drm_memory.o drm_scatter.o drm_vm.o
@@ -70,7 +59,16 @@ obj-$(CONFIG_DRM_TTM_HELPER) += drm_ttm_helper.o
 # Modesetting helpers
 #
 
-drm_kms_helper-y := 
+drm_kms_helper-y := drm_bridge_connector.o drm_crtc_helper.o \
+		drm_encoder_slave.o drm_flip_work.o \
+		drm_probe_helper.o \
+		drm_plane_helper.o drm_atomic_helper.o \
+		drm_kms_helper_common.o \
+		drm_simple_kms_helper.o drm_modeset_helper.o \
+		drm_gem_atomic_helper.o \
+		drm_gem_framebuffer_helper.o \
+		drm_atomic_state_helper.o drm_damage_helper.o \
+		drm_format_helper.o drm_self_refresh_helper.o drm_rect.o
 drm_kms_helper-$(CONFIG_DRM_PANEL_BRIDGE) += bridge/panel.o
 drm_kms_helper-$(CONFIG_DRM_FBDEV_EMULATION) += drm_fb_helper.o
 obj-$(CONFIG_DRM_KMS_HELPER) += drm_kms_helper.o
@@ -150,5 +148,3 @@ obj-y			+= gud/
 obj-$(CONFIG_DRM_HYPERV) += hyperv/
 obj-y			+= solomon/
 obj-$(CONFIG_DRM_SPRD) += sprd/
-
-drm-y += drm_gem_dma_helper.o

@@ -191,7 +191,6 @@ struct ptp_clock_info {
 	int (*verify)(struct ptp_clock_info *ptp, unsigned int pin,
 		      enum ptp_pin_function func, unsigned int chan);
 	long (*do_aux_work)(struct ptp_clock_info *ptp);
-	int (*getsnapshot)(struct ptp_clock_info *ptp, struct timespec64 *ts);
 };
 
 struct ptp_clock;
@@ -289,14 +288,6 @@ extern void ptp_clock_event(struct ptp_clock *ptp,
  */
 
 extern int ptp_clock_index(struct ptp_clock *ptp);
-
-/**
- * scaled_ppm_to_ppb() - convert scaled ppm to ppb
- *
- * @ppm:    Parts per million, but with a 16 bit binary fractional field
- */
-
-extern long scaled_ppm_to_ppb(long ppm);
 
 /**
  * ptp_find_pin() - obtain the pin index of a given auxiliary function

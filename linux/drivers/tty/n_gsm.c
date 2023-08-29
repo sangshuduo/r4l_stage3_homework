@@ -264,7 +264,7 @@ struct gsm_mux {
 	bool constipated;		/* Asked by remote to shut up */
 	bool has_devices;		/* Devices were registered */
 
-	spinlock_t tx_lock;
+	struct mutex tx_mutex;
 	unsigned int tx_bytes;		/* TX data outstanding */
 #define TX_THRESH_HI		8192
 #define TX_THRESH_LO		2048
@@ -272,7 +272,7 @@ struct gsm_mux {
 	struct list_head tx_data_list;	/* Pending data packets */
 
 	/* Control messages */
-	struct timer_list kick_timer;	/* Kick TX queuing on timeout */
+	struct delayed_work kick_timeout;	/* Kick TX queuing on timeout */
 	struct timer_list t2_timer;	/* Retransmit timer for commands */
 	int cretries;			/* Command retry counter */
 	struct gsm_control *pending_cmd;/* Our current pending command */
@@ -700,7 +700,6 @@ static int gsm_send(struct gsm_mux *gsm, int addr, int cr, int control)
 	struct gsm_msg *msg;
 	u8 *dp;
 	int ocr;
-	unsigned long flags;
 
 	msg = gsm_data_alloc(gsm, addr, 0, control);
 	if (!msg)
@@ -722,10 +721,10 @@ static int gsm_send(struct gsm_mux *gsm, int addr, int cr, int control)
 
 	gsm_print_packet("Q->", addr, cr, control, NULL, 0);
 
-	spin_lock_irqsave(&gsm->tx_lock, flags);
+	mutex_lock(&gsm->tx_mutex);
 	list_add_tail(&msg->list, &gsm->tx_ctrl_list);
 	gsm->tx_bytes += msg->len;
-	spin_unlock_irqrestore(&gsm->tx_lock, flags);
+	mutex_unlock(&gsm->tx_mutex);
 	gsmld_write_trigger(gsm);
 
 	return 0;
@@ -750,7 +749,7 @@ static void gsm_dlci_clear_queues(struct gsm_mux *gsm, struct gsm_dlci *dlci)
 	spin_unlock_irqrestore(&dlci->lock, flags);
 
 	/* Clear data packets in MUX write queue */
-	spin_lock_irqsave(&gsm->tx_lock, flags);
+	mutex_lock(&gsm->tx_mutex);
 	list_for_each_entry_safe(msg, nmsg, &gsm->tx_data_list, list) {
 		if (msg->addr != addr)
 			continue;
@@ -758,7 +757,7 @@ static void gsm_dlci_clear_queues(struct gsm_mux *gsm, struct gsm_dlci *dlci)
 		list_del(&msg->list);
 		kfree(msg);
 	}
-	spin_unlock_irqrestore(&gsm->tx_lock, flags);
+	mutex_unlock(&gsm->tx_mutex);
 }
 
 /**
@@ -1029,7 +1028,7 @@ static void __gsm_data_queue(struct gsm_dlci *dlci, struct gsm_msg *msg)
 	gsm->tx_bytes += msg->len;
 
 	gsmld_write_trigger(gsm);
-	mod_timer(&gsm->kick_timer, jiffies + 10 * gsm->t1 * HZ / 100);
+	schedule_delayed_work(&gsm->kick_timeout, 10 * gsm->t1 * HZ / 100);
 }
 
 /**
@@ -1044,10 +1043,9 @@ static void __gsm_data_queue(struct gsm_dlci *dlci, struct gsm_msg *msg)
 
 static void gsm_data_queue(struct gsm_dlci *dlci, struct gsm_msg *msg)
 {
-	unsigned long flags;
-	spin_lock_irqsave(&dlci->gsm->tx_lock, flags);
+	mutex_lock(&dlci->gsm->tx_mutex);
 	__gsm_data_queue(dlci, msg);
-	spin_unlock_irqrestore(&dlci->gsm->tx_lock, flags);
+	mutex_unlock(&dlci->gsm->tx_mutex);
 }
 
 /**
@@ -1059,7 +1057,7 @@ static void gsm_data_queue(struct gsm_dlci *dlci, struct gsm_msg *msg)
  *	is data. Keep to the MRU of the mux. This path handles the usual tty
  *	interface which is a byte stream with optional modem data.
  *
- *	Caller must hold the tx_lock of the mux.
+ *	Caller must hold the tx_mutex of the mux.
  */
 
 static int gsm_dlci_data_output(struct gsm_mux *gsm, struct gsm_dlci *dlci)
@@ -1119,7 +1117,7 @@ static int gsm_dlci_data_output(struct gsm_mux *gsm, struct gsm_dlci *dlci)
  *	is data. Keep to the MRU of the mux. This path handles framed data
  *	queued as skbuffs to the DLCI.
  *
- *	Caller must hold the tx_lock of the mux.
+ *	Caller must hold the tx_mutex of the mux.
  */
 
 static int gsm_dlci_data_output_framed(struct gsm_mux *gsm,
@@ -1135,7 +1133,7 @@ static int gsm_dlci_data_output_framed(struct gsm_mux *gsm,
 	if (dlci->adaption == 4)
 		overhead = 1;
 
-	/* dlci->skb is locked by tx_lock */
+	/* dlci->skb is locked by tx_mutex */
 	if (dlci->skb == NULL) {
 		dlci->skb = skb_dequeue_tail(&dlci->skb_list);
 		if (dlci->skb == NULL)
@@ -1189,7 +1187,7 @@ static int gsm_dlci_data_output_framed(struct gsm_mux *gsm,
  *	Push an empty frame in to the transmit queue to update the modem status
  *	bits and to transmit an optional break.
  *
- *	Caller must hold the tx_lock of the mux.
+ *	Caller must hold the tx_mutex of the mux.
  */
 
 static int gsm_dlci_modem_output(struct gsm_mux *gsm, struct gsm_dlci *dlci,
@@ -1303,13 +1301,12 @@ static int gsm_dlci_data_sweep(struct gsm_mux *gsm)
 
 static void gsm_dlci_data_kick(struct gsm_dlci *dlci)
 {
-	unsigned long flags;
 	int sweep;
 
 	if (dlci->constipated)
 		return;
 
-	spin_lock_irqsave(&dlci->gsm->tx_lock, flags);
+	mutex_lock(&dlci->gsm->tx_mutex);
 	/* If we have nothing running then we need to fire up */
 	sweep = (dlci->gsm->tx_bytes < TX_THRESH_LO);
 	if (dlci->gsm->tx_bytes == 0) {
@@ -1320,7 +1317,7 @@ static void gsm_dlci_data_kick(struct gsm_dlci *dlci)
 	}
 	if (sweep)
 		gsm_dlci_data_sweep(dlci->gsm);
-	spin_unlock_irqrestore(&dlci->gsm->tx_lock, flags);
+	mutex_unlock(&dlci->gsm->tx_mutex);
 }
 
 /*
@@ -1711,7 +1708,7 @@ static struct gsm_control *gsm_control_send(struct gsm_mux *gsm,
 		unsigned int command, u8 *data, int clen)
 {
 	struct gsm_control *ctrl = kzalloc(sizeof(struct gsm_control),
-						GFP_ATOMIC);
+						GFP_KERNEL);
 	unsigned long flags;
 	if (ctrl == NULL)
 		return NULL;
@@ -2022,24 +2019,23 @@ static void gsm_dlci_command(struct gsm_dlci *dlci, const u8 *data, int len)
 }
 
 /**
- *	gsm_kick_timer	-	transmit if possible
- *	@t: timer contained in our gsm object
+ *	gsm_kick_timeout	-	transmit if possible
+ *	@work: work contained in our gsm object
  *
  *	Transmit data from DLCIs if the queue is empty. We can't rely on
  *	a tty wakeup except when we filled the pipe so we need to fire off
  *	new data ourselves in other cases.
  */
-static void gsm_kick_timer(struct timer_list *t)
+static void gsm_kick_timeout(struct work_struct *work)
 {
-	struct gsm_mux *gsm = from_timer(gsm, t, kick_timer);
-	unsigned long flags;
+	struct gsm_mux *gsm = container_of(work, struct gsm_mux, kick_timeout.work);
 	int sent = 0;
 
-	spin_lock_irqsave(&gsm->tx_lock, flags);
+	mutex_lock(&gsm->tx_mutex);
 	/* If we have nothing running then we need to fire up */
 	if (gsm->tx_bytes < TX_THRESH_LO)
 		sent = gsm_dlci_data_sweep(gsm);
-	spin_unlock_irqrestore(&gsm->tx_lock, flags);
+	mutex_unlock(&gsm->tx_mutex);
 
 	if (sent && debug & DBG_DATA)
 		pr_info("%s TX queue stalled\n", __func__);
@@ -2496,7 +2492,7 @@ static void gsm_cleanup_mux(struct gsm_mux *gsm, bool disc)
 	}
 
 	/* Finish outstanding timers, making sure they are done */
-	del_timer_sync(&gsm->kick_timer);
+	cancel_delayed_work_sync(&gsm->kick_timeout);
 	del_timer_sync(&gsm->t2_timer);
 
 	/* Finish writing to ldisc */
@@ -2569,6 +2565,7 @@ static void gsm_free_mux(struct gsm_mux *gsm)
 			break;
 		}
 	}
+	mutex_destroy(&gsm->tx_mutex);
 	mutex_destroy(&gsm->mutex);
 	kfree(gsm->txframe);
 	kfree(gsm->buf);
@@ -2640,15 +2637,15 @@ static struct gsm_mux *gsm_alloc_mux(void)
 	}
 	spin_lock_init(&gsm->lock);
 	mutex_init(&gsm->mutex);
+	mutex_init(&gsm->tx_mutex);
 	kref_init(&gsm->ref);
 	INIT_LIST_HEAD(&gsm->tx_ctrl_list);
 	INIT_LIST_HEAD(&gsm->tx_data_list);
-	timer_setup(&gsm->kick_timer, gsm_kick_timer, 0);
+	INIT_DELAYED_WORK(&gsm->kick_timeout, gsm_kick_timeout);
 	timer_setup(&gsm->t2_timer, gsm_control_retransmit, 0);
 	INIT_WORK(&gsm->tx_work, gsmld_write_task);
 	init_waitqueue_head(&gsm->event);
 	spin_lock_init(&gsm->control_lock);
-	spin_lock_init(&gsm->tx_lock);
 
 	gsm->t1 = T1;
 	gsm->t2 = T2;
@@ -2673,6 +2670,7 @@ static struct gsm_mux *gsm_alloc_mux(void)
 	}
 	spin_unlock(&gsm_mux_lock);
 	if (i == MAX_MUX) {
+		mutex_destroy(&gsm->tx_mutex);
 		mutex_destroy(&gsm->mutex);
 		kfree(gsm->txframe);
 		kfree(gsm->buf);
@@ -2828,17 +2826,16 @@ static void gsmld_write_trigger(struct gsm_mux *gsm)
 static void gsmld_write_task(struct work_struct *work)
 {
 	struct gsm_mux *gsm = container_of(work, struct gsm_mux, tx_work);
-	unsigned long flags;
 	int i, ret;
 
 	/* All outstanding control channel and control messages and one data
 	 * frame is sent.
 	 */
 	ret = -ENODEV;
-	spin_lock_irqsave(&gsm->tx_lock, flags);
+	mutex_lock(&gsm->tx_mutex);
 	if (gsm->tty)
 		ret = gsm_data_kick(gsm);
-	spin_unlock_irqrestore(&gsm->tx_lock, flags);
+	mutex_unlock(&gsm->tx_mutex);
 
 	if (ret >= 0)
 		for (i = 0; i < NUM_DLCI; i++)
@@ -3045,7 +3042,6 @@ static ssize_t gsmld_write(struct tty_struct *tty, struct file *file,
 			   const unsigned char *buf, size_t nr)
 {
 	struct gsm_mux *gsm = tty->disc_data;
-	unsigned long flags;
 	int space;
 	int ret;
 
@@ -3053,13 +3049,13 @@ static ssize_t gsmld_write(struct tty_struct *tty, struct file *file,
 		return -ENODEV;
 
 	ret = -ENOBUFS;
-	spin_lock_irqsave(&gsm->tx_lock, flags);
+	mutex_lock(&gsm->tx_mutex);
 	space = tty_write_room(tty);
 	if (space >= nr)
 		ret = tty->ops->write(tty, buf, nr);
 	else
 		set_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
-	spin_unlock_irqrestore(&gsm->tx_lock, flags);
+	mutex_unlock(&gsm->tx_mutex);
 
 	return ret;
 }
@@ -3356,14 +3352,13 @@ static struct tty_ldisc_ops tty_ldisc_packet = {
 static void gsm_modem_upd_via_data(struct gsm_dlci *dlci, u8 brk)
 {
 	struct gsm_mux *gsm = dlci->gsm;
-	unsigned long flags;
 
 	if (dlci->state != DLCI_OPEN || dlci->adaption != 2)
 		return;
 
-	spin_lock_irqsave(&gsm->tx_lock, flags);
+	mutex_lock(&gsm->tx_mutex);
 	gsm_dlci_modem_output(gsm, dlci, brk);
-	spin_unlock_irqrestore(&gsm->tx_lock, flags);
+	mutex_unlock(&gsm->tx_mutex);
 }
 
 /**

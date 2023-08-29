@@ -108,7 +108,7 @@ struct ovl_fh {
 	u8 padding[3];	/* make sure fb.fid is 32bit aligned */
 	union {
 		struct ovl_fb fb;
-		DECLARE_FLEX_ARRAY(u8, buf);
+		u8 buf[0];
 	};
 } __packed;
 

@@ -476,12 +476,7 @@ static int __init vc4_drm_register(void)
 	if (ret)
 		return ret;
 
-	ret = platform_driver_register(&vc4_platform_driver);
-	if (ret)
-		platform_unregister_drivers(component_drivers,
-					    ARRAY_SIZE(component_drivers));
-
-	return ret;
+	return platform_driver_register(&vc4_platform_driver);
 }
 
 static void __exit vc4_drm_unregister(void)
@@ -495,7 +490,6 @@ module_init(vc4_drm_register);
 module_exit(vc4_drm_unregister);
 
 MODULE_ALIAS("platform:vc4-drm");
-MODULE_SOFTDEP("pre: snd-soc-hdmi-codec");
 MODULE_DESCRIPTION("Broadcom VC4 DRM Driver");
 MODULE_AUTHOR("Eric Anholt <eric@anholt.net>");
 MODULE_LICENSE("GPL v2");

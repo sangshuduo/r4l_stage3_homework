@@ -85,10 +85,9 @@ static bool is_alt_drrs_mode(const struct drm_display_mode *mode,
 static bool is_alt_fixed_mode(const struct drm_display_mode *mode,
 			      const struct drm_display_mode *preferred_mode)
 {
-	u32 sync_flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NHSYNC |
-		DRM_MODE_FLAG_PVSYNC | DRM_MODE_FLAG_NVSYNC;
-
-	return (mode->flags & ~sync_flags) == (preferred_mode->flags & ~sync_flags) &&
+	return drm_mode_match(mode, preferred_mode,
+			      DRM_MODE_MATCH_FLAGS |
+			      DRM_MODE_MATCH_3D_FLAGS) &&
 		mode->hdisplay == preferred_mode->hdisplay &&
 		mode->vdisplay == preferred_mode->vdisplay;
 }
@@ -255,10 +254,10 @@ static void intel_panel_destroy_probed_modes(struct intel_connector *connector)
 }
 
 void intel_panel_add_edid_fixed_modes(struct intel_connector *connector,
-				      bool use_alt_fixed_modes)
+				      bool has_drrs, bool has_vrr)
 {
 	intel_panel_add_edid_preferred_mode(connector);
-	if (intel_panel_preferred_fixed_mode(connector) && use_alt_fixed_modes)
+	if (intel_panel_preferred_fixed_mode(connector) && (has_drrs || has_vrr))
 		intel_panel_add_edid_alt_fixed_modes(connector);
 	intel_panel_destroy_probed_modes(connector);
 }

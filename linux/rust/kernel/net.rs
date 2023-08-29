@@ -142,11 +142,6 @@ impl Device {
             Ok(unsafe { &*(skb as *const SkBuff) }.into())
         }
     }
-
-    /// wrapper of netif_tx_disable
-    pub fn netif_tx_disable(&self) {
-        unsafe { bindings::netif_tx_disable(self.0.get()) }
-    }
 }
 
 /// Registration structure for a network device.
@@ -185,7 +180,6 @@ impl<T: DeviceOperations> Registration<T> {
         // SAFETY: `dev` was allocated during initialization and is guaranteed to be valid.
         let ret = unsafe {
             (*self.dev).netdev_ops = Self::build_device_ops();
-            (*self.dev).ethtool_ops = Self::build_ethtools_ops();
 
             // SAFETY: The C contract guarantees that `data` is available
             // for implementers of the net_device operations (no other C code accesses
@@ -384,93 +378,6 @@ impl<T: DeviceOperations> Registration<T> {
 
         T::get_stats64(dev, data, &mut RtnlLinkStats64 { ptr: storage });
     }
-
-    const VTABLE: bindings::ethtool_ops = bindings::ethtool_ops {
-        _bitfield_1: bindings::__BindgenBitfieldUnit::new([0; 1]),
-        supported_coalesce_params: 0,
-        supported_ring_params: 0,
-        get_drvinfo: Some(Self::get_drvinfo_callback),
-        get_regs_len: None,
-        get_regs: None,
-        get_wol: None,
-        set_wol: None,
-        get_msglevel: None,
-        set_msglevel: None,
-        nway_reset: None,
-        get_link: None,
-        get_link_ext_state: None,
-        get_eeprom_len: None,
-        get_eeprom: None,
-        set_eeprom: None,
-        get_coalesce: None,
-        set_coalesce: None,
-        get_ringparam: None,
-        set_ringparam: None,
-        get_pause_stats: None,
-        get_pauseparam: None,
-        set_pauseparam: None,
-        self_test: None,
-        get_strings: None,
-        set_phys_id: None,
-        get_ethtool_stats: None,
-        begin: None,
-        complete: None,
-        get_priv_flags: None,
-        set_priv_flags: None,
-        get_sset_count: None,
-        get_rxnfc: None,
-        set_rxnfc: None,
-        flash_device: None,
-        reset: None,
-        get_rxfh_key_size: None,
-        get_rxfh_indir_size: None,
-        get_rxfh: None,
-        set_rxfh: None,
-        get_rxfh_context: None,
-        set_rxfh_context: None,
-        get_channels: None,
-        set_channels: None,
-        get_dump_flag: None,
-        get_dump_data: None,
-        set_dump: None,
-        get_ts_info: None,
-        get_module_info: None,
-        get_module_eeprom: None,
-        get_eee: None,
-        set_eee: None,
-        get_tunable: None,
-        set_tunable: None,
-        get_per_queue_coalesce: None,
-        set_per_queue_coalesce: None,
-        get_link_ksettings: None,
-        set_link_ksettings: None,
-        get_fec_stats: None,
-        get_fecparam: None,
-        set_fecparam: None,
-        get_ethtool_phy_stats: None,
-        get_phy_tunable: None,
-        set_phy_tunable: None,
-        get_module_eeprom_by_page: None,
-        get_eth_phy_stats: None,
-        get_eth_mac_stats: None,
-        get_eth_ctrl_stats: None,
-        get_rmon_stats: None,
-        get_module_power_mode: None,
-        set_module_power_mode: None,
-    };
-
-    pub(crate) const unsafe fn build_ethtools_ops() -> &'static bindings::ethtool_ops {
-        &Self::VTABLE
-    }
-
-    unsafe extern "C" fn get_drvinfo_callback(
-        netdev: *mut bindings::net_device,
-        drvinfo: *mut bindings::ethtool_drvinfo,
-    ) {
-        let dev = unsafe { Device::from_ptr(netdev) };
-        let data = unsafe { T::Data::borrow(bindings::dev_get_drvdata(&mut (*netdev).dev)) };
-        T::get_drvinfo(dev, data, drvinfo);
-    }
 }
 
 /// Corresponds to the kernel's `struct rtnl_link_stats64`.
@@ -547,13 +454,6 @@ pub trait DeviceOperations {
         _storage: &mut RtnlLinkStats64,
     ) {
     }
-
-    /// Corresponds to 'get_drvinfo' in 'struct ethtool_ops' .
-    fn get_drvinfo(
-        dev: &Device,
-        data: <Self::Data as PointerWrapper>::Borrowed<'_>,
-        drvinfo: *mut bindings::ethtool_drvinfo,
-    );
 }
 
 /// Wraps the kernel's `struct napi_struct`.
@@ -609,13 +509,6 @@ impl Napi {
     pub fn dev_get(&self) -> ARef<Device> {
         // SAFETY: The existence of a shared reference means `self.0` is valid.
         unsafe { &*(addr_of!((*self.0.get()).dev).read() as *const Device) }.into()
-    }
-
-    /// Disable NAPI scheduling.
-    pub fn disable(&self) {
-        unsafe {
-            bindings::napi_disable(self.0.get());
-        }
     }
 }
 

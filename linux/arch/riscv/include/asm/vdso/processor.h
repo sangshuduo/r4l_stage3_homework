@@ -21,7 +21,7 @@ static inline void cpu_relax(void)
 		 * Reduce instruction retirement.
 		 * This assumes the PC changes.
 		 */
-#ifdef CONFIG_TOOLCHAIN_HAS_ZIHINTPAUSE
+#ifdef __riscv_zihintpause
 		__asm__ __volatile__ ("pause");
 #else
 		/* Encoding of the pause instruction */

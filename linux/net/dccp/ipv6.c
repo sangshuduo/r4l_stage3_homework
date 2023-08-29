@@ -934,11 +934,26 @@ static int dccp_v6_connect(struct sock *sk, struct sockaddr *uaddr,
 	}
 
 	if (saddr == NULL) {
-		saddr = &fl6.saddr;
+		struct inet_bind_hashbucket *prev_addr_hashbucket = NULL;
+		struct in6_addr prev_v6_rcv_saddr;
 
-		err = inet_bhash2_update_saddr(sk, saddr, AF_INET6);
-		if (err)
-			goto failure;
+		if (icsk->icsk_bind2_hash) {
+			prev_addr_hashbucket = inet_bhashfn_portaddr(&dccp_hashinfo,
+								     sk, sock_net(sk),
+								     inet->inet_num);
+			prev_v6_rcv_saddr = sk->sk_v6_rcv_saddr;
+		}
+
+		saddr = &fl6.saddr;
+		sk->sk_v6_rcv_saddr = *saddr;
+
+		if (prev_addr_hashbucket) {
+			err = inet_bhash2_update_saddr(prev_addr_hashbucket, sk);
+			if (err) {
+				sk->sk_v6_rcv_saddr = prev_v6_rcv_saddr;
+				goto failure;
+			}
+		}
 	}
 
 	/* set the source address */
@@ -970,7 +985,6 @@ static int dccp_v6_connect(struct sock *sk, struct sockaddr *uaddr,
 
 late_failure:
 	dccp_set_state(sk, DCCP_CLOSED);
-	inet_bhash2_reset_saddr(sk);
 	__sk_dst_reset(sk);
 failure:
 	inet->inet_dport = 0;

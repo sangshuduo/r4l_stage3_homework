@@ -9,7 +9,7 @@ config VIDEO_V4L2_I2C
 	default y
 
 config VIDEO_V4L2_SUBDEV_API
-	bool "V4L2 sub-device userspace API"
+	bool
 	depends on VIDEO_DEV && MEDIA_CONTROLLER
 	help
 	  Enables the V4L2 sub-device pad-level userspace API used to configure

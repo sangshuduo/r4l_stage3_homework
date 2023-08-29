@@ -166,9 +166,11 @@ static bool btrfs_supported_super_csum(u16 csum_type)
  * Return 0 if the superblock checksum type matches the checksum value of that
  * algorithm. Pass the raw disk superblock data.
  */
-int btrfs_check_super_csum(struct btrfs_fs_info *fs_info,
-			   const struct btrfs_super_block *disk_sb)
+static int btrfs_check_super_csum(struct btrfs_fs_info *fs_info,
+				  char *raw_disk_sb)
 {
+	struct btrfs_super_block *disk_sb =
+		(struct btrfs_super_block *)raw_disk_sb;
 	char result[BTRFS_CSUM_SIZE];
 	SHASH_DESC_ON_STACK(shash, fs_info->csum_shash);
 
@@ -179,7 +181,7 @@ int btrfs_check_super_csum(struct btrfs_fs_info *fs_info,
 	 * BTRFS_SUPER_INFO_SIZE range, we expect that the unused space is
 	 * filled with zeros and is included in the checksum.
 	 */
-	crypto_shash_digest(shash, (const u8 *)disk_sb + BTRFS_CSUM_SIZE,
+	crypto_shash_digest(shash, raw_disk_sb + BTRFS_CSUM_SIZE,
 			    BTRFS_SUPER_INFO_SIZE - BTRFS_CSUM_SIZE, result);
 
 	if (memcmp(disk_sb->csum, result, fs_info->csum_size))
@@ -344,14 +346,7 @@ error:
 	btrfs_print_tree(eb, 0);
 	btrfs_err(fs_info, "block=%llu write time tree block corruption detected",
 		  eb->start);
-	/*
-	 * Be noisy if this is an extent buffer from a log tree. We don't abort
-	 * a transaction in case there's a bad log tree extent buffer, we just
-	 * fallback to a transaction commit. Still we want to know when there is
-	 * a bad log tree extent buffer, as that may signal a bug somewhere.
-	 */
-	WARN_ON(IS_ENABLED(CONFIG_BTRFS_DEBUG) ||
-		btrfs_header_owner(eb) == BTRFS_TREE_LOG_OBJECTID);
+	WARN_ON(IS_ENABLED(CONFIG_BTRFS_DEBUG));
 	return ret;
 }
 
@@ -2558,9 +2553,7 @@ static int btrfs_read_roots(struct btrfs_fs_info *fs_info)
 		fs_info->dev_root = root;
 	}
 	/* Initialize fs_info for all devices in any case */
-	ret = btrfs_init_devices_late(fs_info);
-	if (ret)
-		goto out;
+	btrfs_init_devices_late(fs_info);
 
 	/*
 	 * This tree can share blocks with some other fs tree during relocation
@@ -3303,8 +3296,6 @@ out:
 /*
  * Do various sanity and dependency checks of different features.
  *
- * @is_rw_mount:	If the mount is read-write.
- *
  * This is the place for less strict checks (like for subpage or artificial
  * feature dependencies).
  *
@@ -3315,7 +3306,7 @@ out:
  * (space cache related) can modify on-disk format like free space tree and
  * screw up certain feature dependencies.
  */
-int btrfs_check_features(struct btrfs_fs_info *fs_info, bool is_rw_mount)
+int btrfs_check_features(struct btrfs_fs_info *fs_info, struct super_block *sb)
 {
 	struct btrfs_super_block *disk_super = fs_info->super_copy;
 	u64 incompat = btrfs_super_incompat_flags(disk_super);
@@ -3354,7 +3345,7 @@ int btrfs_check_features(struct btrfs_fs_info *fs_info, bool is_rw_mount)
 	if (btrfs_super_nodesize(disk_super) > PAGE_SIZE)
 		incompat |= BTRFS_FEATURE_INCOMPAT_BIG_METADATA;
 
-	if (compat_ro_unsupp && is_rw_mount) {
+	if (compat_ro_unsupp && !sb_rdonly(sb)) {
 		btrfs_err(fs_info,
 	"cannot mount read-write because of unknown compat_ro features (0x%llx)",
 		       compat_ro);
@@ -3488,7 +3479,7 @@ int __cold open_ctree(struct super_block *sb, struct btrfs_fs_devices *fs_device
 	 * We want to check superblock checksum, the type is stored inside.
 	 * Pass the whole disk block of size BTRFS_SUPER_INFO_SIZE (4k).
 	 */
-	if (btrfs_check_super_csum(fs_info, disk_super)) {
+	if (btrfs_check_super_csum(fs_info, (u8 *)disk_super)) {
 		btrfs_err(fs_info, "superblock checksum mismatch");
 		err = -EINVAL;
 		btrfs_release_disk_super(disk_super);
@@ -3557,7 +3548,7 @@ int __cold open_ctree(struct super_block *sb, struct btrfs_fs_devices *fs_device
 		goto fail_alloc;
 	}
 
-	ret = btrfs_check_features(fs_info, !sb_rdonly(sb));
+	ret = btrfs_check_features(fs_info, sb);
 	if (ret < 0) {
 		err = ret;
 		goto fail_alloc;

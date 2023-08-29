@@ -976,12 +976,12 @@ static void dsa_slave_get_ethtool_stats(struct net_device *dev,
 
 		s = per_cpu_ptr(dev->tstats, i);
 		do {
-			start = u64_stats_fetch_begin(&s->syncp);
+			start = u64_stats_fetch_begin_irq(&s->syncp);
 			tx_packets = u64_stats_read(&s->tx_packets);
 			tx_bytes = u64_stats_read(&s->tx_bytes);
 			rx_packets = u64_stats_read(&s->rx_packets);
 			rx_bytes = u64_stats_read(&s->rx_bytes);
-		} while (u64_stats_fetch_retry(&s->syncp, start));
+		} while (u64_stats_fetch_retry_irq(&s->syncp, start));
 		data[0] += tx_packets;
 		data[1] += tx_bytes;
 		data[2] += rx_packets;
@@ -3145,7 +3145,7 @@ static int dsa_slave_netdevice_event(struct notifier_block *nb,
 	case NETDEV_CHANGELOWERSTATE: {
 		struct netdev_notifier_changelowerstate_info *info = ptr;
 		struct dsa_port *dp;
-		int err = 0;
+		int err;
 
 		if (dsa_slave_dev_check(dev)) {
 			dp = dsa_slave_to_port(dev);

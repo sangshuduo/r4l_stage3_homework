@@ -188,13 +188,6 @@ struct drm_device {
 	 */
 	struct list_head clientlist;
 
-
-
-	/* IRQs */
-	bool irq_enabled;
-	int irq;
-
-
 	/**
 	 * @vblank_disable_immediate:
 	 *
@@ -363,6 +356,9 @@ struct drm_device {
 	/* Scatter gather memory */
 	struct drm_sg_mem *sg;
 
+	/* IRQs */
+	bool irq_enabled;
+	int irq;
 #endif
 };
 

@@ -134,8 +134,7 @@ static int sb_write_pointer(struct block_device *bdev, struct blk_zone *zones,
 			super[i] = page_address(page[i]);
 		}
 
-		if (btrfs_super_generation(super[0]) >
-		    btrfs_super_generation(super[1]))
+		if (super[0]->generation > super[1]->generation)
 			sector = zones[1].start;
 		else
 			sector = zones[0].start;
@@ -467,7 +466,7 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 		goto out;
 	}
 
-	zones = kvcalloc(BTRFS_REPORT_NR_ZONES, sizeof(struct blk_zone), GFP_KERNEL);
+	zones = kcalloc(BTRFS_REPORT_NR_ZONES, sizeof(struct blk_zone), GFP_KERNEL);
 	if (!zones) {
 		ret = -ENOMEM;
 		goto out;
@@ -538,8 +537,6 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 		}
 		atomic_set(&zone_info->active_zones_left,
 			   max_active_zones - nactive);
-		/* Overcommit does not work well with active zone tacking. */
-		set_bit(BTRFS_FS_NO_OVERCOMMIT, &fs_info->flags);
 	}
 
 	/* Validate superblock log */
@@ -588,7 +585,7 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 	}
 
 
-	kvfree(zones);
+	kfree(zones);
 
 	switch (bdev_zoned_model(bdev)) {
 	case BLK_ZONED_HM:
@@ -620,7 +617,7 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 	return 0;
 
 out:
-	kvfree(zones);
+	kfree(zones);
 out_free_zone_info:
 	btrfs_destroy_dev_zone_info(device);
 
@@ -640,46 +637,6 @@ void btrfs_destroy_dev_zone_info(struct btrfs_device *device)
 	vfree(zone_info->zone_cache);
 	kfree(zone_info);
 	device->zone_info = NULL;
-}
-
-struct btrfs_zoned_device_info *btrfs_clone_dev_zone_info(struct btrfs_device *orig_dev)
-{
-	struct btrfs_zoned_device_info *zone_info;
-
-	zone_info = kmemdup(orig_dev->zone_info, sizeof(*zone_info), GFP_KERNEL);
-	if (!zone_info)
-		return NULL;
-
-	zone_info->seq_zones = bitmap_zalloc(zone_info->nr_zones, GFP_KERNEL);
-	if (!zone_info->seq_zones)
-		goto out;
-
-	bitmap_copy(zone_info->seq_zones, orig_dev->zone_info->seq_zones,
-		    zone_info->nr_zones);
-
-	zone_info->empty_zones = bitmap_zalloc(zone_info->nr_zones, GFP_KERNEL);
-	if (!zone_info->empty_zones)
-		goto out;
-
-	bitmap_copy(zone_info->empty_zones, orig_dev->zone_info->empty_zones,
-		    zone_info->nr_zones);
-
-	zone_info->active_zones = bitmap_zalloc(zone_info->nr_zones, GFP_KERNEL);
-	if (!zone_info->active_zones)
-		goto out;
-
-	bitmap_copy(zone_info->active_zones, orig_dev->zone_info->active_zones,
-		    zone_info->nr_zones);
-	zone_info->zone_cache = NULL;
-
-	return zone_info;
-
-out:
-	bitmap_free(zone_info->seq_zones);
-	bitmap_free(zone_info->empty_zones);
-	bitmap_free(zone_info->active_zones);
-	kfree(zone_info);
-	return NULL;
 }
 
 int btrfs_get_dev_zone(struct btrfs_device *device, u64 pos,

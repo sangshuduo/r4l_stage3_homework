@@ -6,9 +6,9 @@
 # Rewritten to use lists instead of if-statements.
 #
 
-
 obj-y				+= irqchip/
 obj-y				+= bus/
+
 obj-$(CONFIG_GENERIC_PHY)	+= phy/
 
 # GPIO must come after pinctrl as gpios may need to mux pins etc
@@ -60,7 +60,7 @@ obj-y				+= char/
 obj-y				+= iommu/
 
 # gpu/ comes after char for AGP vs DRM startup and after iommu
-#obj-y				+= gpu/
+obj-y				+= gpu/
 
 obj-$(CONFIG_CONNECTOR)		+= connector/
 
@@ -189,4 +189,3 @@ obj-$(CONFIG_COUNTER)		+= counter/
 obj-$(CONFIG_MOST)		+= most/
 obj-$(CONFIG_PECI)		+= peci/
 obj-$(CONFIG_HTE)		+= hte/
-

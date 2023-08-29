@@ -486,17 +486,6 @@ static int intel_engine_setup(struct intel_gt *gt, enum intel_engine_id id,
 	engine->logical_mask = BIT(logical_instance);
 	__sprint_engine_name(engine);
 
-	if ((engine->class == COMPUTE_CLASS && !RCS_MASK(engine->gt) &&
-	     __ffs(CCS_MASK(engine->gt)) == engine->instance) ||
-	     engine->class == RENDER_CLASS)
-		engine->flags |= I915_ENGINE_FIRST_RENDER_COMPUTE;
-
-	/* features common between engines sharing EUs */
-	if (engine->class == RENDER_CLASS || engine->class == COMPUTE_CLASS) {
-		engine->flags |= I915_ENGINE_HAS_RCS_REG_STATE;
-		engine->flags |= I915_ENGINE_HAS_EU_PRIORITY;
-	}
-
 	engine->props.heartbeat_interval_ms =
 		CONFIG_DRM_I915_HEARTBEAT_INTERVAL;
 	engine->props.max_busywait_duration_ns =
@@ -509,28 +498,19 @@ static int intel_engine_setup(struct intel_gt *gt, enum intel_engine_id id,
 		CONFIG_DRM_I915_TIMESLICE_DURATION;
 
 	/* Override to uninterruptible for OpenCL workloads. */
-	if (GRAPHICS_VER(i915) == 12 && (engine->flags & I915_ENGINE_HAS_RCS_REG_STATE))
+	if (GRAPHICS_VER(i915) == 12 && engine->class == RENDER_CLASS)
 		engine->props.preempt_timeout_ms = 0;
 
-	/* Cap properties according to any system limits */
-#define CLAMP_PROP(field) \
-	do { \
-		u64 clamp = intel_clamp_##field(engine, engine->props.field); \
-		if (clamp != engine->props.field) { \
-			drm_notice(&engine->i915->drm, \
-				   "Warning, clamping %s to %lld to prevent overflow\n", \
-				   #field, clamp); \
-			engine->props.field = clamp; \
-		} \
-	} while (0)
+	if ((engine->class == COMPUTE_CLASS && !RCS_MASK(engine->gt) &&
+	     __ffs(CCS_MASK(engine->gt)) == engine->instance) ||
+	     engine->class == RENDER_CLASS)
+		engine->flags |= I915_ENGINE_FIRST_RENDER_COMPUTE;
 
-	CLAMP_PROP(heartbeat_interval_ms);
-	CLAMP_PROP(max_busywait_duration_ns);
-	CLAMP_PROP(preempt_timeout_ms);
-	CLAMP_PROP(stop_timeout_ms);
-	CLAMP_PROP(timeslice_duration_ms);
-
-#undef CLAMP_PROP
+	/* features common between engines sharing EUs */
+	if (engine->class == RENDER_CLASS || engine->class == COMPUTE_CLASS) {
+		engine->flags |= I915_ENGINE_HAS_RCS_REG_STATE;
+		engine->flags |= I915_ENGINE_HAS_EU_PRIORITY;
+	}
 
 	engine->defaults = engine->props; /* never to change again */
 
@@ -552,55 +532,6 @@ static int intel_engine_setup(struct intel_gt *gt, enum intel_engine_id id,
 	gt->engine[id] = engine;
 
 	return 0;
-}
-
-u64 intel_clamp_heartbeat_interval_ms(struct intel_engine_cs *engine, u64 value)
-{
-	value = min_t(u64, value, jiffies_to_msecs(MAX_SCHEDULE_TIMEOUT));
-
-	return value;
-}
-
-u64 intel_clamp_max_busywait_duration_ns(struct intel_engine_cs *engine, u64 value)
-{
-	value = min(value, jiffies_to_nsecs(2));
-
-	return value;
-}
-
-u64 intel_clamp_preempt_timeout_ms(struct intel_engine_cs *engine, u64 value)
-{
-	/*
-	 * NB: The GuC API only supports 32bit values. However, the limit is further
-	 * reduced due to internal calculations which would otherwise overflow.
-	 */
-	if (intel_guc_submission_is_wanted(&engine->gt->uc.guc))
-		value = min_t(u64, value, guc_policy_max_preempt_timeout_ms());
-
-	value = min_t(u64, value, jiffies_to_msecs(MAX_SCHEDULE_TIMEOUT));
-
-	return value;
-}
-
-u64 intel_clamp_stop_timeout_ms(struct intel_engine_cs *engine, u64 value)
-{
-	value = min_t(u64, value, jiffies_to_msecs(MAX_SCHEDULE_TIMEOUT));
-
-	return value;
-}
-
-u64 intel_clamp_timeslice_duration_ms(struct intel_engine_cs *engine, u64 value)
-{
-	/*
-	 * NB: The GuC API only supports 32bit values. However, the limit is further
-	 * reduced due to internal calculations which would otherwise overflow.
-	 */
-	if (intel_guc_submission_is_wanted(&engine->gt->uc.guc))
-		value = min_t(u64, value, guc_policy_max_exec_quantum_ms());
-
-	value = min_t(u64, value, jiffies_to_msecs(MAX_SCHEDULE_TIMEOUT));
-
-	return value;
 }
 
 static void __setup_engine_capabilities(struct intel_engine_cs *engine)
@@ -1343,13 +1274,8 @@ int intel_engines_init(struct intel_gt *gt)
 			return err;
 
 		err = setup(engine);
-		if (err) {
-			intel_engine_cleanup_common(engine);
+		if (err)
 			return err;
-		}
-
-		/* The backend should now be responsible for cleanup */
-		GEM_BUG_ON(engine->release == NULL);
 
 		err = engine_init_common(engine);
 		if (err)
@@ -2078,6 +2004,17 @@ static void print_request_ring(struct drm_printer *m, struct i915_request *rq)
 	}
 }
 
+static unsigned long list_count(struct list_head *list)
+{
+	struct list_head *pos;
+	unsigned long count = 0;
+
+	list_for_each(pos, list)
+		count++;
+
+	return count;
+}
+
 static unsigned long read_ul(void *p, size_t x)
 {
 	return *(unsigned long *)(p + x);
@@ -2169,11 +2106,11 @@ void intel_engine_dump_active_requests(struct list_head *requests,
 	}
 }
 
-static void engine_dump_active_requests(struct intel_engine_cs *engine,
-					struct drm_printer *m)
+static void engine_dump_active_requests(struct intel_engine_cs *engine, struct drm_printer *m)
 {
-	struct intel_context *hung_ce = NULL;
 	struct i915_request *hung_rq = NULL;
+	struct intel_context *ce;
+	bool guc;
 
 	/*
 	 * No need for an engine->irq_seqno_barrier() before the seqno reads.
@@ -2182,22 +2119,27 @@ static void engine_dump_active_requests(struct intel_engine_cs *engine,
 	 * But the intention here is just to report an instantaneous snapshot
 	 * so that's fine.
 	 */
-	intel_engine_get_hung_entity(engine, &hung_ce, &hung_rq);
+	lockdep_assert_held(&engine->sched_engine->lock);
 
 	drm_printf(m, "\tRequests:\n");
 
+	guc = intel_uc_uses_guc_submission(&engine->gt->uc);
+	if (guc) {
+		ce = intel_engine_get_hung_context(engine);
+		if (ce)
+			hung_rq = intel_context_find_active_request(ce);
+	} else {
+		hung_rq = intel_engine_execlist_find_hung_request(engine);
+	}
+
 	if (hung_rq)
 		engine_dump_request(hung_rq, m, "\t\thung");
-	else if (hung_ce)
-		drm_printf(m, "\t\tGot hung ce but no hung rq!\n");
 
-	if (intel_uc_uses_guc_submission(&engine->gt->uc))
+	if (guc)
 		intel_guc_dump_active_requests(engine, hung_rq, m);
 	else
-		intel_execlists_dump_active_requests(engine, hung_rq, m);
-
-	if (hung_rq)
-		i915_request_put(hung_rq);
+		intel_engine_dump_active_requests(&engine->sched_engine->requests,
+						  hung_rq, m);
 }
 
 void intel_engine_dump(struct intel_engine_cs *engine,
@@ -2207,6 +2149,7 @@ void intel_engine_dump(struct intel_engine_cs *engine,
 	struct i915_gpu_error * const error = &engine->i915->gpu_error;
 	struct i915_request *rq;
 	intel_wakeref_t wakeref;
+	unsigned long flags;
 	ktime_t dummy;
 
 	if (header) {
@@ -2243,7 +2186,12 @@ void intel_engine_dump(struct intel_engine_cs *engine,
 		   i915_reset_count(error));
 	print_properties(engine, m);
 
+	spin_lock_irqsave(&engine->sched_engine->lock, flags);
 	engine_dump_active_requests(engine, m);
+
+	drm_printf(m, "\tOn hold?: %lu\n",
+		   list_count(&engine->sched_engine->hold));
+	spin_unlock_irqrestore(&engine->sched_engine->lock, flags);
 
 	drm_printf(m, "\tMMIO base:  0x%08x\n", engine->mmio_base);
 	wakeref = intel_runtime_pm_get_if_in_use(engine->uncore->rpm);
@@ -2290,7 +2238,8 @@ intel_engine_create_virtual(struct intel_engine_cs **siblings,
 	return siblings[0]->cops->create_virtual(siblings, count, flags);
 }
 
-static struct i915_request *engine_execlist_find_hung_request(struct intel_engine_cs *engine)
+struct i915_request *
+intel_engine_execlist_find_hung_request(struct intel_engine_cs *engine)
 {
 	struct i915_request *request, *active = NULL;
 
@@ -2340,33 +2289,6 @@ static struct i915_request *engine_execlist_find_hung_request(struct intel_engin
 	}
 
 	return active;
-}
-
-void intel_engine_get_hung_entity(struct intel_engine_cs *engine,
-				  struct intel_context **ce, struct i915_request **rq)
-{
-	unsigned long flags;
-
-	*ce = intel_engine_get_hung_context(engine);
-	if (*ce) {
-		intel_engine_clear_hung_context(engine);
-
-		*rq = intel_context_get_active_request(*ce);
-		return;
-	}
-
-	/*
-	 * Getting here with GuC enabled means it is a forced error capture
-	 * with no actual hang. So, no need to attempt the execlist search.
-	 */
-	if (intel_uc_uses_guc_submission(&engine->gt->uc))
-		return;
-
-	spin_lock_irqsave(&engine->sched_engine->lock, flags);
-	*rq = engine_execlist_find_hung_request(engine);
-	if (*rq)
-		*rq = i915_request_get_rcu(*rq);
-	spin_unlock_irqrestore(&engine->sched_engine->lock, flags);
 }
 
 void xehp_enable_ccs_engines(struct intel_engine_cs *engine)

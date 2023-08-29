@@ -29,7 +29,6 @@
 
 #include <linux/list.h>
 #include <linux/irqreturn.h>
-#include <linux/uuid.h>
 
 #include <drm/drm_device.h>
 
@@ -43,9 +42,6 @@ struct drm_display_mode;
 struct drm_mode_create_dumb;
 struct drm_printer;
 struct sg_table;
-
-struct iosys_map;
-
 
 /**
  * enum drm_driver_feature - feature flags
@@ -291,114 +287,6 @@ struct drm_driver {
 	 * Allows drivers to create driver-specific debugfs files.
 	 */
 	void (*debugfs_init)(struct drm_minor *minor);
-
-
-
-	/**
-	 * @gem_free_object_unlocked: deconstructor for drm_gem_objects
-	 *
-	 * This is deprecated and should not be used by new drivers. Use
-	 * &drm_gem_object_funcs.free instead.
-	 */
-	void (*gem_free_object_unlocked) (struct drm_gem_object *obj);
-
-	/**
-	 * @gem_open_object:
-	 *
-	 * This callback is deprecated in favour of &drm_gem_object_funcs.open.
-	 *
-	 * Driver hook called upon gem handle creation
-	 */
-	int (*gem_open_object) (struct drm_gem_object *, struct drm_file *);
-
-	/**
-	 * @gem_close_object:
-	 *
-	 * This callback is deprecated in favour of &drm_gem_object_funcs.close.
-	 *
-	 * Driver hook called upon gem handle release
-	 */
-	void (*gem_close_object) (struct drm_gem_object *, struct drm_file *);
-
-
-	/**
-	 * @gem_prime_export:
-	 *
-	 * Export hook for GEM drivers. Deprecated in favour of
-	 * &drm_gem_object_funcs.export.
-	 */
-	struct dma_buf * (*gem_prime_export)(struct drm_gem_object *obj,
-					     int flags);
-
-
-
-
-	/**
-	 * @gem_prime_pin:
-	 *
-	 * Deprecated hook in favour of &drm_gem_object_funcs.pin.
-	 */
-	int (*gem_prime_pin)(struct drm_gem_object *obj);
-
-	/**
-	 * @gem_prime_unpin:
-	 *
-	 * Deprecated hook in favour of &drm_gem_object_funcs.unpin.
-	 */
-	void (*gem_prime_unpin)(struct drm_gem_object *obj);
-
-
-	/**
-	 * @gem_prime_get_sg_table:
-	 *
-	 * Deprecated hook in favour of &drm_gem_object_funcs.get_sg_table.
-	 */
-	struct sg_table *(*gem_prime_get_sg_table)(struct drm_gem_object *obj);
-
-
-	/**
-	 * @gem_prime_vmap:
-	 *
-	 * Deprecated vmap hook for GEM drivers. Please use
-	 * &drm_gem_object_funcs.vmap instead.
-	 */
-
-	int (*gem_prime_vmap)(struct drm_gem_object *obj, struct iosys_map *map);
-	// void *(*gem_prime_vmap)(struct drm_gem_object *obj);
-
-	/**
-	 * @gem_prime_vunmap:
-	 *
-	 * Deprecated vunmap hook for GEM drivers. Please use
-	 * &drm_gem_object_funcs.vunmap instead.
-	 */
-
-
-	void (*gem_prime_vunmap)(struct drm_gem_object *obj, void *vaddr);
-
-
-
-
-	/**
-	 * @gem_prime_get_uuid
-	 *
-	 * get_uuid hook for GEM drivers. Retrieves the virtio uuid of the
-	 * given GEM buffer.
-	 */
-	int (*gem_prime_get_uuid)(struct drm_gem_object *obj,
-				  uuid_t *uuid);
-
-
-
-
-	/**
-	 * @gem_vm_ops: Driver private ops for this object
-	 *
-	 * For GEM drivers this is deprecated in favour of
-	 * &drm_gem_object_funcs.vm_ops.
-	 */
-	const struct vm_operations_struct *gem_vm_ops;
-
 
 	/**
 	 * @gem_create_object: constructor for gem objects

@@ -5,7 +5,6 @@
  * Copyright (C) 2012 ARM Ltd.
  */
 #include <linux/kernel.h>
-#include <linux/efi.h>
 #include <linux/export.h>
 #include <linux/ftrace.h>
 #include <linux/sched.h>
@@ -13,7 +12,6 @@
 #include <linux/sched/task_stack.h>
 #include <linux/stacktrace.h>
 
-#include <asm/efi.h>
 #include <asm/irq.h>
 #include <asm/stack_pointer.h>
 #include <asm/stacktrace.h>
@@ -25,8 +23,8 @@
  *
  * The regs must be on a stack currently owned by the calling task.
  */
-static __always_inline void unwind_init_from_regs(struct unwind_state *state,
-						  struct pt_regs *regs)
+static inline void unwind_init_from_regs(struct unwind_state *state,
+					 struct pt_regs *regs)
 {
 	unwind_init_common(state, current);
 
@@ -60,8 +58,8 @@ static __always_inline void unwind_init_from_caller(struct unwind_state *state)
  * duration of the unwind, or the unwind will be bogus. It is never valid to
  * call this for the current task.
  */
-static __always_inline void unwind_init_from_task(struct unwind_state *state,
-						  struct task_struct *task)
+static inline void unwind_init_from_task(struct unwind_state *state,
+					 struct task_struct *task)
 {
 	unwind_init_common(state, task);
 
@@ -188,14 +186,7 @@ void show_stack(struct task_struct *tsk, unsigned long *sp, const char *loglvl)
 			: stackinfo_get_unknown();		\
 	})
 
-#define STACKINFO_EFI						\
-	({							\
-		((task == current) && current_in_efi())		\
-			? stackinfo_get_efi()			\
-			: stackinfo_get_unknown();		\
-	})
-
-noinline noinstr void arch_stack_walk(stack_trace_consume_fn consume_entry,
+noinline notrace void arch_stack_walk(stack_trace_consume_fn consume_entry,
 			      void *cookie, struct task_struct *task,
 			      struct pt_regs *regs)
 {
@@ -208,9 +199,6 @@ noinline noinstr void arch_stack_walk(stack_trace_consume_fn consume_entry,
 #if defined(CONFIG_VMAP_STACK) && defined(CONFIG_ARM_SDE_INTERFACE)
 		STACKINFO_SDEI(normal),
 		STACKINFO_SDEI(critical),
-#endif
-#ifdef CONFIG_EFI
-		STACKINFO_EFI,
 #endif
 	};
 	struct unwind_state state = {

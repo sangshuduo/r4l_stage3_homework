@@ -263,8 +263,6 @@ enum tpacpi_hkey_event_t {
 #define TPACPI_DBG_BRGHT	0x0020
 #define TPACPI_DBG_MIXER	0x0040
 
-#define FAN_NOT_PRESENT		65535
-
 #define strlencmp(a, b) (strncmp((a), (b), strlen(b)))
 
 
@@ -4497,14 +4495,6 @@ static const struct dmi_system_id fwbug_list[] __initconst = {
 			DMI_MATCH(DMI_PRODUCT_NAME, "21A0"),
 		}
 	},
-	{
-		.ident = "P14s Gen2 AMD",
-		.driver_data = &quirk_s2idle_bug,
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "21A1"),
-		}
-	},
 	{}
 };
 
@@ -5566,13 +5556,12 @@ static int light_sysfs_set(struct led_classdev *led_cdev,
 
 static enum led_brightness light_sysfs_get(struct led_classdev *led_cdev)
 {
-	return (light_get_status() == 1) ? LED_ON : LED_OFF;
+	return (light_get_status() == 1) ? LED_FULL : LED_OFF;
 }
 
 static struct tpacpi_led_classdev tpacpi_led_thinklight = {
 	.led_classdev = {
 		.name		= "tpacpi::thinklight",
-		.max_brightness	= 1,
 		.brightness_set_blocking = &light_sysfs_set,
 		.brightness_get	= &light_sysfs_get,
 	}
@@ -8887,7 +8876,7 @@ static int __init fan_init(struct ibm_init_struct *iibm)
 			/* Try and probe the 2nd fan */
 			tp_features.second_fan = 1; /* needed for get_speed to work */
 			res = fan2_get_speed(&speed);
-			if (res >= 0 && speed != FAN_NOT_PRESENT) {
+			if (res >= 0) {
 				/* It responded - so let's assume it's there */
 				tp_features.second_fan = 1;
 				tp_features.second_fan_ctl = 1;
@@ -10315,11 +10304,9 @@ static DEFINE_MUTEX(dytc_mutex);
 static int dytc_capabilities;
 static bool dytc_mmc_get_available;
 
-static int convert_dytc_to_profile(int funcmode, int dytcmode,
-		enum platform_profile_option *profile)
+static int convert_dytc_to_profile(int dytcmode, enum platform_profile_option *profile)
 {
-	switch (funcmode) {
-	case DYTC_FUNCTION_MMC:
+	if (dytc_capabilities & BIT(DYTC_FC_MMC)) {
 		switch (dytcmode) {
 		case DYTC_MODE_MMC_LOWPOWER:
 			*profile = PLATFORM_PROFILE_LOW_POWER;
@@ -10335,7 +10322,8 @@ static int convert_dytc_to_profile(int funcmode, int dytcmode,
 			return -EINVAL;
 		}
 		return 0;
-	case DYTC_FUNCTION_PSC:
+	}
+	if (dytc_capabilities & BIT(DYTC_FC_PSC)) {
 		switch (dytcmode) {
 		case DYTC_MODE_PSC_LOWPOWER:
 			*profile = PLATFORM_PROFILE_LOW_POWER;
@@ -10349,14 +10337,6 @@ static int convert_dytc_to_profile(int funcmode, int dytcmode,
 		default: /* Unknown mode */
 			return -EINVAL;
 		}
-		return 0;
-	case DYTC_FUNCTION_AMT:
-		/* For now return balanced. It's the closest we have to 'auto' */
-		*profile =  PLATFORM_PROFILE_BALANCED;
-		return 0;
-	default:
-		/* Unknown function */
-		return -EOPNOTSUPP;
 	}
 	return 0;
 }
@@ -10500,11 +10480,11 @@ static int dytc_profile_set(struct platform_profile_handler *pprof,
 			if (err)
 				goto unlock;
 		}
-	} else if (dytc_capabilities & BIT(DYTC_FC_PSC)) {
+	}
+	if (dytc_capabilities & BIT(DYTC_FC_PSC)) {
 		err = dytc_command(DYTC_SET_COMMAND(DYTC_FUNCTION_PSC, perfmode, 1), &output);
 		if (err)
 			goto unlock;
-
 		/* system supports AMT, activate it when on balanced */
 		if (dytc_capabilities & BIT(DYTC_FC_AMT))
 			dytc_control_amt(profile == PLATFORM_PROFILE_BALANCED);
@@ -10520,7 +10500,7 @@ static void dytc_profile_refresh(void)
 {
 	enum platform_profile_option profile;
 	int output, err = 0;
-	int perfmode, funcmode;
+	int perfmode;
 
 	mutex_lock(&dytc_mutex);
 	if (dytc_capabilities & BIT(DYTC_FC_MMC)) {
@@ -10528,18 +10508,15 @@ static void dytc_profile_refresh(void)
 			err = dytc_command(DYTC_CMD_MMC_GET, &output);
 		else
 			err = dytc_cql_command(DYTC_CMD_GET, &output);
-		funcmode = DYTC_FUNCTION_MMC;
-	} else if (dytc_capabilities & BIT(DYTC_FC_PSC)) {
+	} else if (dytc_capabilities & BIT(DYTC_FC_PSC))
 		err = dytc_command(DYTC_CMD_GET, &output);
-		/* Check if we are PSC mode, or have AMT enabled */
-		funcmode = (output >> DYTC_GET_FUNCTION_BIT) & 0xF;
-	}
+
 	mutex_unlock(&dytc_mutex);
 	if (err)
 		return;
 
 	perfmode = (output >> DYTC_GET_MODE_BIT) & 0xF;
-	convert_dytc_to_profile(funcmode, perfmode, &profile);
+	convert_dytc_to_profile(perfmode, &profile);
 	if (profile != dytc_current_profile) {
 		dytc_current_profile = profile;
 		platform_profile_notify();

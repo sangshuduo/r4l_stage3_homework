@@ -242,6 +242,8 @@ static void io_req_io_end(struct io_kiocb *req)
 {
 	struct io_rw *rw = io_kiocb_to_cmd(req, struct io_rw);
 
+	WARN_ON(!in_task());
+
 	if (rw->kiocb.ki_flags & IOCB_WRITE) {
 		kiocb_end_write(req);
 		fsnotify_modify(req->file);
@@ -548,12 +550,12 @@ static inline int io_rw_prep_async(struct io_kiocb *req, int rw)
 
 int io_readv_prep_async(struct io_kiocb *req)
 {
-	return io_rw_prep_async(req, ITER_DEST);
+	return io_rw_prep_async(req, READ);
 }
 
 int io_writev_prep_async(struct io_kiocb *req)
 {
-	return io_rw_prep_async(req, ITER_SOURCE);
+	return io_rw_prep_async(req, WRITE);
 }
 
 /*
@@ -704,7 +706,7 @@ int io_read(struct io_kiocb *req, unsigned int issue_flags)
 	loff_t *ppos;
 
 	if (!req_has_async_data(req)) {
-		ret = io_import_iovec(ITER_DEST, req, &iovec, s, issue_flags);
+		ret = io_import_iovec(READ, req, &iovec, s, issue_flags);
 		if (unlikely(ret < 0))
 			return ret;
 	} else {
@@ -716,7 +718,7 @@ int io_read(struct io_kiocb *req, unsigned int issue_flags)
 		 * buffers, as we dropped the selected one before retry.
 		 */
 		if (io_do_buffer_select(req)) {
-			ret = io_import_iovec(ITER_DEST, req, &iovec, s, issue_flags);
+			ret = io_import_iovec(READ, req, &iovec, s, issue_flags);
 			if (unlikely(ret < 0))
 				return ret;
 		}
@@ -851,7 +853,7 @@ int io_write(struct io_kiocb *req, unsigned int issue_flags)
 	loff_t *ppos;
 
 	if (!req_has_async_data(req)) {
-		ret = io_import_iovec(ITER_SOURCE, req, &iovec, s, issue_flags);
+		ret = io_import_iovec(WRITE, req, &iovec, s, issue_flags);
 		if (unlikely(ret < 0))
 			return ret;
 	} else {
@@ -1055,11 +1057,7 @@ int io_do_iopoll(struct io_ring_ctx *ctx, bool force_nonspin)
 			continue;
 
 		req->cqe.flags = io_put_kbuf(req, 0);
-		if (unlikely(!__io_fill_cqe_req(ctx, req))) {
-			spin_lock(&ctx->completion_lock);
-			io_req_cqe_overflow(req);
-			spin_unlock(&ctx->completion_lock);
-		}
+		__io_fill_cqe_req(req->ctx, req);
 	}
 
 	if (unlikely(!nr_events))

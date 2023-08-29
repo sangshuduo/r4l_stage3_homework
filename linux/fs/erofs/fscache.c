@@ -75,14 +75,10 @@ static void erofs_fscache_rreq_unlock_folios(struct netfs_io_request *rreq)
 
 	rcu_read_lock();
 	xas_for_each(&xas, folio, last_page) {
-		unsigned int pgpos, pgend;
+		unsigned int pgpos =
+			(folio_index(folio) - start_page) * PAGE_SIZE;
+		unsigned int pgend = pgpos + folio_size(folio);
 		bool pg_failed = false;
-
-		if (xas_retry(&xas, folio))
-			continue;
-
-		pgpos = (folio_index(folio) - start_page) * PAGE_SIZE;
-		pgend = pgpos + folio_size(folio);
 
 		for (;;) {
 			if (!subreq) {
@@ -194,7 +190,7 @@ static int erofs_fscache_read_folios_async(struct fscache_cookie *cookie,
 
 		atomic_inc(&rreq->nr_outstanding);
 
-		iov_iter_xarray(&iter, ITER_DEST, &rreq->mapping->i_pages,
+		iov_iter_xarray(&iter, READ, &rreq->mapping->i_pages,
 				start + done, subreq->len);
 
 		ret = fscache_read(cres, subreq->start, &iter,
@@ -290,25 +286,22 @@ static int erofs_fscache_data_read(struct address_space *mapping,
 		if (IS_ERR(src))
 			return PTR_ERR(src);
 
-		iov_iter_xarray(&iter, ITER_DEST, &mapping->i_pages, pos, PAGE_SIZE);
-		if (copy_to_iter(src + offset, size, &iter) != size) {
-			erofs_put_metabuf(&buf);
+		iov_iter_xarray(&iter, READ, &mapping->i_pages, pos, PAGE_SIZE);
+		if (copy_to_iter(src + offset, size, &iter) != size)
 			return -EFAULT;
-		}
 		iov_iter_zero(PAGE_SIZE - size, &iter);
 		erofs_put_metabuf(&buf);
 		return PAGE_SIZE;
 	}
 
+	count = min_t(size_t, map.m_llen - (pos - map.m_la), len);
+	DBG_BUGON(!count || count % PAGE_SIZE);
+
 	if (!(map.m_flags & EROFS_MAP_MAPPED)) {
-		count = len;
-		iov_iter_xarray(&iter, ITER_DEST, &mapping->i_pages, pos, count);
+		iov_iter_xarray(&iter, READ, &mapping->i_pages, pos, count);
 		iov_iter_zero(count, &iter);
 		return count;
 	}
-
-	count = min_t(size_t, map.m_llen - (pos - map.m_la), len);
-	DBG_BUGON(!count || count % PAGE_SIZE);
 
 	mdev = (struct erofs_map_dev) {
 		.m_deviceid = map.m_deviceid,
@@ -410,13 +403,13 @@ static void erofs_fscache_domain_put(struct erofs_domain *domain)
 static int erofs_fscache_register_volume(struct super_block *sb)
 {
 	struct erofs_sb_info *sbi = EROFS_SB(sb);
-	char *domain_id = sbi->domain_id;
+	char *domain_id = sbi->opt.domain_id;
 	struct fscache_volume *volume;
 	char *name;
 	int ret = 0;
 
 	name = kasprintf(GFP_KERNEL, "erofs,%s",
-			 domain_id ? domain_id : sbi->fsid);
+			 domain_id ? domain_id : sbi->opt.fsid);
 	if (!name)
 		return -ENOMEM;
 
@@ -442,7 +435,7 @@ static int erofs_fscache_init_domain(struct super_block *sb)
 	if (!domain)
 		return -ENOMEM;
 
-	domain->domain_id = kstrdup(sbi->domain_id, GFP_KERNEL);
+	domain->domain_id = kstrdup(sbi->opt.domain_id, GFP_KERNEL);
 	if (!domain->domain_id) {
 		kfree(domain);
 		return -ENOMEM;
@@ -479,7 +472,7 @@ static int erofs_fscache_register_domain(struct super_block *sb)
 
 	mutex_lock(&erofs_domain_list_lock);
 	list_for_each_entry(domain, &erofs_domain_list, list) {
-		if (!strcmp(domain->domain_id, sbi->domain_id)) {
+		if (!strcmp(domain->domain_id, sbi->opt.domain_id)) {
 			sbi->domain = domain;
 			sbi->volume = domain->volume;
 			refcount_inc(&domain->ref);
@@ -494,8 +487,7 @@ static int erofs_fscache_register_domain(struct super_block *sb)
 
 static
 struct erofs_fscache *erofs_fscache_acquire_cookie(struct super_block *sb,
-						   char *name,
-						   unsigned int flags)
+						    char *name, bool need_inode)
 {
 	struct fscache_volume *volume = EROFS_SB(sb)->volume;
 	struct erofs_fscache *ctx;
@@ -517,7 +509,7 @@ struct erofs_fscache *erofs_fscache_acquire_cookie(struct super_block *sb,
 	fscache_use_cookie(cookie, false);
 	ctx->cookie = cookie;
 
-	if (flags & EROFS_REG_COOKIE_NEED_INODE) {
+	if (need_inode) {
 		struct inode *const inode = new_inode(sb);
 
 		if (!inode) {
@@ -555,15 +547,14 @@ static void erofs_fscache_relinquish_cookie(struct erofs_fscache *ctx)
 
 static
 struct erofs_fscache *erofs_fscache_domain_init_cookie(struct super_block *sb,
-						       char *name,
-						       unsigned int flags)
+		char *name, bool need_inode)
 {
 	int err;
 	struct inode *inode;
 	struct erofs_fscache *ctx;
 	struct erofs_domain *domain = EROFS_SB(sb)->domain;
 
-	ctx = erofs_fscache_acquire_cookie(sb, name, flags);
+	ctx = erofs_fscache_acquire_cookie(sb, name, need_inode);
 	if (IS_ERR(ctx))
 		return ctx;
 
@@ -591,8 +582,7 @@ out:
 
 static
 struct erofs_fscache *erofs_domain_register_cookie(struct super_block *sb,
-						   char *name,
-						   unsigned int flags)
+						   char *name, bool need_inode)
 {
 	struct inode *inode;
 	struct erofs_fscache *ctx;
@@ -600,35 +590,25 @@ struct erofs_fscache *erofs_domain_register_cookie(struct super_block *sb,
 	struct super_block *psb = erofs_pseudo_mnt->mnt_sb;
 
 	mutex_lock(&erofs_domain_cookies_lock);
-	spin_lock(&psb->s_inode_list_lock);
 	list_for_each_entry(inode, &psb->s_inodes, i_sb_list) {
 		ctx = inode->i_private;
 		if (!ctx || ctx->domain != domain || strcmp(ctx->name, name))
 			continue;
-		if (!(flags & EROFS_REG_COOKIE_NEED_NOEXIST)) {
-			igrab(inode);
-		} else {
-			erofs_err(sb, "%s already exists in domain %s", name,
-				  domain->domain_id);
-			ctx = ERR_PTR(-EEXIST);
-		}
-		spin_unlock(&psb->s_inode_list_lock);
+		igrab(inode);
 		mutex_unlock(&erofs_domain_cookies_lock);
 		return ctx;
 	}
-	spin_unlock(&psb->s_inode_list_lock);
-	ctx = erofs_fscache_domain_init_cookie(sb, name, flags);
+	ctx = erofs_fscache_domain_init_cookie(sb, name, need_inode);
 	mutex_unlock(&erofs_domain_cookies_lock);
 	return ctx;
 }
 
 struct erofs_fscache *erofs_fscache_register_cookie(struct super_block *sb,
-						    char *name,
-						    unsigned int flags)
+						    char *name, bool need_inode)
 {
-	if (EROFS_SB(sb)->domain_id)
-		return erofs_domain_register_cookie(sb, name, flags);
-	return erofs_fscache_acquire_cookie(sb, name, flags);
+	if (EROFS_SB(sb)->opt.domain_id)
+		return erofs_domain_register_cookie(sb, name, need_inode);
+	return erofs_fscache_acquire_cookie(sb, name, need_inode);
 }
 
 void erofs_fscache_unregister_cookie(struct erofs_fscache *ctx)
@@ -657,29 +637,16 @@ int erofs_fscache_register_fs(struct super_block *sb)
 	int ret;
 	struct erofs_sb_info *sbi = EROFS_SB(sb);
 	struct erofs_fscache *fscache;
-	unsigned int flags;
 
-	if (sbi->domain_id)
+	if (sbi->opt.domain_id)
 		ret = erofs_fscache_register_domain(sb);
 	else
 		ret = erofs_fscache_register_volume(sb);
 	if (ret)
 		return ret;
 
-	/*
-	 * When shared domain is enabled, using NEED_NOEXIST to guarantee
-	 * the primary data blob (aka fsid) is unique in the shared domain.
-	 *
-	 * For non-shared-domain case, fscache_acquire_volume() invoked by
-	 * erofs_fscache_register_volume() has already guaranteed
-	 * the uniqueness of primary data blob.
-	 *
-	 * Acquired domain/volume will be relinquished in kill_sb() on error.
-	 */
-	flags = EROFS_REG_COOKIE_NEED_INODE;
-	if (sbi->domain_id)
-		flags |= EROFS_REG_COOKIE_NEED_NOEXIST;
-	fscache = erofs_fscache_register_cookie(sb, sbi->fsid, flags);
+	/* acquired domain/volume will be relinquished in kill_sb() on error */
+	fscache = erofs_fscache_register_cookie(sb, sbi->opt.fsid, true);
 	if (IS_ERR(fscache))
 		return PTR_ERR(fscache);
 

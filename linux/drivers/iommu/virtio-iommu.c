@@ -490,13 +490,11 @@ static int viommu_add_resv_mem(struct viommu_endpoint *vdev,
 		fallthrough;
 	case VIRTIO_IOMMU_RESV_MEM_T_RESERVED:
 		region = iommu_alloc_resv_region(start, size, 0,
-						 IOMMU_RESV_RESERVED,
-						 GFP_KERNEL);
+						 IOMMU_RESV_RESERVED);
 		break;
 	case VIRTIO_IOMMU_RESV_MEM_T_MSI:
 		region = iommu_alloc_resv_region(start, size, prot,
-						 IOMMU_RESV_MSI,
-						 GFP_KERNEL);
+						 IOMMU_RESV_MSI);
 		break;
 	}
 	if (!region)
@@ -911,8 +909,7 @@ static void viommu_get_resv_regions(struct device *dev, struct list_head *head)
 	 */
 	if (!msi) {
 		msi = iommu_alloc_resv_region(MSI_IOVA_BASE, MSI_IOVA_LENGTH,
-					      prot, IOMMU_RESV_SW_MSI,
-					      GFP_KERNEL);
+					      prot, IOMMU_RESV_SW_MSI);
 		if (!msi)
 			return;
 

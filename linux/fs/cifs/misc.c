@@ -400,7 +400,6 @@ is_valid_oplock_break(char *buffer, struct TCP_Server_Info *srv)
 {
 	struct smb_hdr *buf = (struct smb_hdr *)buffer;
 	struct smb_com_lock_req *pSMB = (struct smb_com_lock_req *)buf;
-	struct TCP_Server_Info *pserver;
 	struct cifs_ses *ses;
 	struct cifs_tcon *tcon;
 	struct cifsInodeInfo *pCifsInode;
@@ -465,12 +464,9 @@ is_valid_oplock_break(char *buffer, struct TCP_Server_Info *srv)
 	if (!(pSMB->LockType & LOCKING_ANDX_OPLOCK_RELEASE))
 		return false;
 
-	/* If server is a channel, select the primary channel */
-	pserver = CIFS_SERVER_IS_CHAN(srv) ? srv->primary_server : srv;
-
 	/* look up tcon based on tid & uid */
 	spin_lock(&cifs_tcp_ses_lock);
-	list_for_each_entry(ses, &pserver->smb_ses_list, smb_ses_list) {
+	list_for_each_entry(ses, &srv->smb_ses_list, smb_ses_list) {
 		list_for_each_entry(tcon, &ses->tcon_list, tcon_list) {
 			if (tcon->tid != buf->Tid)
 				continue;
@@ -1136,8 +1132,8 @@ cifs_free_hash(struct shash_desc **sdesc)
  * @len: Where to store the length for this page:
  * @offset: Where to store the offset for this page
  */
-void rqst_page_get_length(const struct smb_rqst *rqst, unsigned int page,
-			  unsigned int *len, unsigned int *offset)
+void rqst_page_get_length(struct smb_rqst *rqst, unsigned int page,
+				unsigned int *len, unsigned int *offset)
 {
 	*len = rqst->rq_pagesz;
 	*offset = (page == 0) ? rqst->rq_offset : 0;
@@ -1313,5 +1309,50 @@ int cifs_update_super_prepath(struct cifs_sb_info *cifs_sb, char *prefix)
 
 	cifs_sb->mnt_cifs_flags |= CIFS_MOUNT_USE_PREFIX_PATH;
 	return 0;
+}
+
+/** cifs_dfs_query_info_nonascii_quirk
+ * Handle weird Windows SMB server behaviour. It responds with
+ * STATUS_OBJECT_NAME_INVALID code to SMB2 QUERY_INFO request
+ * for "\<server>\<dfsname>\<linkpath>" DFS reference,
+ * where <dfsname> contains non-ASCII unicode symbols.
+ *
+ * Check such DFS reference.
+ */
+int cifs_dfs_query_info_nonascii_quirk(const unsigned int xid,
+				       struct cifs_tcon *tcon,
+				       struct cifs_sb_info *cifs_sb,
+				       const char *linkpath)
+{
+	char *treename, *dfspath, sep;
+	int treenamelen, linkpathlen, rc;
+
+	treename = tcon->tree_name;
+	/* MS-DFSC: All paths in REQ_GET_DFS_REFERRAL and RESP_GET_DFS_REFERRAL
+	 * messages MUST be encoded with exactly one leading backslash, not two
+	 * leading backslashes.
+	 */
+	sep = CIFS_DIR_SEP(cifs_sb);
+	if (treename[0] == sep && treename[1] == sep)
+		treename++;
+	linkpathlen = strlen(linkpath);
+	treenamelen = strnlen(treename, MAX_TREE_SIZE + 1);
+	dfspath = kzalloc(treenamelen + linkpathlen + 1, GFP_KERNEL);
+	if (!dfspath)
+		return -ENOMEM;
+	if (treenamelen)
+		memcpy(dfspath, treename, treenamelen);
+	memcpy(dfspath + treenamelen, linkpath, linkpathlen);
+	rc = dfs_cache_find(xid, tcon->ses, cifs_sb->local_nls,
+			    cifs_remap(cifs_sb), dfspath, NULL, NULL);
+	if (rc == 0) {
+		cifs_dbg(FYI, "DFS ref '%s' is found, emulate -EREMOTE\n",
+			 dfspath);
+		rc = -EREMOTE;
+	} else {
+		cifs_dbg(FYI, "%s: dfs_cache_find returned %d\n", __func__, rc);
+	}
+	kfree(dfspath);
+	return rc;
 }
 #endif

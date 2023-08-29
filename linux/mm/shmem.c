@@ -472,10 +472,12 @@ bool shmem_is_huge(struct vm_area_struct *vma, struct inode *inode,
 	if (vma && ((vma->vm_flags & VM_NOHUGEPAGE) ||
 	    test_bit(MMF_DISABLE_THP, &vma->vm_mm->flags)))
 		return false;
+	if (shmem_huge_force)
+		return true;
+	if (shmem_huge == SHMEM_HUGE_FORCE)
+		return true;
 	if (shmem_huge == SHMEM_HUGE_DENY)
 		return false;
-	if (shmem_huge_force || shmem_huge == SHMEM_HUGE_FORCE)
-		return true;
 
 	switch (SHMEM_SB(inode->i_sb)->huge) {
 	case SHMEM_HUGE_ALWAYS:
@@ -946,15 +948,6 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 		index++;
 	}
 
-	/*
-	 * When undoing a failed fallocate, we want none of the partial folio
-	 * zeroing and splitting below, but shall want to truncate the whole
-	 * folio when !uptodate indicates that it was added by this fallocate,
-	 * even when [lstart, lend] covers only a part of the folio.
-	 */
-	if (unfalloc)
-		goto whole_folios;
-
 	same_folio = (lstart >> PAGE_SHIFT) == (lend >> PAGE_SHIFT);
 	folio = shmem_get_partial_folio(inode, lstart >> PAGE_SHIFT);
 	if (folio) {
@@ -979,8 +972,6 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, loff_t lend,
 		folio_unlock(folio);
 		folio_put(folio);
 	}
-
-whole_folios:
 
 	index = start;
 	while (index < end) {
@@ -2433,26 +2424,9 @@ int shmem_mfill_atomic_pte(struct mm_struct *dst_mm,
 
 		if (!zeropage) {	/* COPY */
 			page_kaddr = kmap_local_folio(folio, 0);
-			/*
-			 * The read mmap_lock is held here.  Despite the
-			 * mmap_lock being read recursive a deadlock is still
-			 * possible if a writer has taken a lock.  For example:
-			 *
-			 * process A thread 1 takes read lock on own mmap_lock
-			 * process A thread 2 calls mmap, blocks taking write lock
-			 * process B thread 1 takes page fault, read lock on own mmap lock
-			 * process B thread 2 calls mmap, blocks taking write lock
-			 * process A thread 1 blocks taking read lock on process B
-			 * process B thread 1 blocks taking read lock on process A
-			 *
-			 * Disable page faults to prevent potential deadlock
-			 * and retry the copy outside the mmap_lock.
-			 */
-			pagefault_disable();
 			ret = copy_from_user(page_kaddr,
 					     (const void __user *)src_addr,
 					     PAGE_SIZE);
-			pagefault_enable();
 			kunmap_local(page_kaddr);
 
 			/* fallback to copy_from_user outside mmap_lock */

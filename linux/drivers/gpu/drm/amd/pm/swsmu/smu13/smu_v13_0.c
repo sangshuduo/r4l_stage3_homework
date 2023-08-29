@@ -211,8 +211,7 @@ int smu_v13_0_init_pptable_microcode(struct smu_context *smu)
 		return 0;
 
 	if ((adev->ip_versions[MP1_HWIP][0] == IP_VERSION(13, 0, 7)) ||
-	    (adev->ip_versions[MP1_HWIP][0] == IP_VERSION(13, 0, 0)) ||
-	    (adev->ip_versions[MP1_HWIP][0] == IP_VERSION(13, 0, 10)))
+	    (adev->ip_versions[MP1_HWIP][0] == IP_VERSION(13, 0, 0)))
 		return 0;
 
 	/* override pptable_id from driver parameter */
@@ -250,7 +249,6 @@ int smu_v13_0_check_fw_status(struct smu_context *smu)
 
 	switch (adev->ip_versions[MP1_HWIP][0]) {
 	case IP_VERSION(13, 0, 4):
-	case IP_VERSION(13, 0, 11):
 		mp1_fw_flags = RREG32_PCIE(MP1_Public |
 					   (smnMP1_V13_0_4_FIRMWARE_FLAGS & 0xffffffff));
 		break;
@@ -290,10 +288,7 @@ int smu_v13_0_check_fw_version(struct smu_context *smu)
 		smu->smc_driver_if_version = SMU13_DRIVER_IF_VERSION_ALDE;
 		break;
 	case IP_VERSION(13, 0, 0):
-		smu->smc_driver_if_version = SMU13_DRIVER_IF_VERSION_SMU_V13_0_0_0;
-		break;
-	case IP_VERSION(13, 0, 10):
-		smu->smc_driver_if_version = SMU13_DRIVER_IF_VERSION_SMU_V13_0_0_10;
+		smu->smc_driver_if_version = SMU13_DRIVER_IF_VERSION_SMU_V13_0_0;
 		break;
 	case IP_VERSION(13, 0, 7):
 		smu->smc_driver_if_version = SMU13_DRIVER_IF_VERSION_SMU_V13_0_7;
@@ -304,11 +299,13 @@ int smu_v13_0_check_fw_version(struct smu_context *smu)
 		smu->smc_driver_if_version = SMU13_DRIVER_IF_VERSION_YELLOW_CARP;
 		break;
 	case IP_VERSION(13, 0, 4):
-	case IP_VERSION(13, 0, 11):
 		smu->smc_driver_if_version = SMU13_DRIVER_IF_VERSION_SMU_V13_0_4;
 		break;
 	case IP_VERSION(13, 0, 5):
 		smu->smc_driver_if_version = SMU13_DRIVER_IF_VERSION_SMU_V13_0_5;
+		break;
+	case IP_VERSION(13, 0, 10):
+		smu->smc_driver_if_version = SMU13_DRIVER_IF_VERSION_SMU_V13_0_10;
 		break;
 	default:
 		dev_err(adev->dev, "smu unsupported IP version: 0x%x.\n",
@@ -457,6 +454,9 @@ int smu_v13_0_setup_pptable(struct smu_context *smu)
 		dev_info(adev->dev, "override pptable id %d\n", pptable_id);
 	} else {
 		pptable_id = smu->smu_table.boot_values.pp_table_id;
+
+		if (adev->ip_versions[MP1_HWIP][0] == IP_VERSION(13, 0, 10))
+			pptable_id = 6666;
 	}
 
 	/* force using vbios pptable in sriov mode */
@@ -844,8 +844,6 @@ int smu_v13_0_gfx_off_control(struct smu_context *smu, bool enable)
 	case IP_VERSION(13, 0, 5):
 	case IP_VERSION(13, 0, 7):
 	case IP_VERSION(13, 0, 8):
-	case IP_VERSION(13, 0, 10):
-	case IP_VERSION(13, 0, 11):
 		if (!(adev->pm.pp_feature & PP_GFXOFF_MASK))
 			return 0;
 		if (enable)
@@ -1261,8 +1259,7 @@ int smu_v13_0_set_fan_speed_rpm(struct smu_context *smu,
 				uint32_t speed)
 {
 	struct amdgpu_device *adev = smu->adev;
-	uint32_t crystal_clock_freq = 2500;
-	uint32_t tach_period;
+	uint32_t tach_period, crystal_clock_freq;
 	int ret;
 
 	if (!speed)
@@ -1272,6 +1269,7 @@ int smu_v13_0_set_fan_speed_rpm(struct smu_context *smu,
 	if (ret)
 		return ret;
 
+	crystal_clock_freq = amdgpu_asic_get_xclk(adev);
 	tach_period = 60 * crystal_clock_freq * 10000 / (8 * speed);
 	WREG32_SOC15(THM, 0, regCG_TACH_CTRL,
 		     REG_SET_FIELD(RREG32_SOC15(THM, 0, regCG_TACH_CTRL),
@@ -2151,21 +2149,6 @@ int smu_v13_0_run_btc(struct smu_context *smu)
 	return res;
 }
 
-int smu_v13_0_gpo_control(struct smu_context *smu,
-			  bool enablement)
-{
-	int res;
-
-	res = smu_cmn_send_smc_msg_with_param(smu,
-					      SMU_MSG_AllowGpo,
-					      enablement ? 1 : 0,
-					      NULL);
-	if (res)
-		dev_err(smu->adev->dev, "SetGpoAllow %d failed!\n", enablement);
-
-	return res;
-}
-
 int smu_v13_0_deep_sleep_control(struct smu_context *smu,
 				 bool enablement)
 {
@@ -2250,15 +2233,6 @@ int smu_v13_0_gfx_ulv_control(struct smu_context *smu,
 	return ret;
 }
 
-int smu_v13_0_baco_set_armd3_sequence(struct smu_context *smu,
-				      enum smu_baco_seq baco_seq)
-{
-	return smu_cmn_send_smc_msg_with_param(smu,
-					       SMU_MSG_ArmD3,
-					       baco_seq,
-					       NULL);
-}
-
 bool smu_v13_0_baco_is_support(struct smu_context *smu)
 {
 	struct smu_baco_context *smu_baco = &smu->smu_baco;
@@ -2266,10 +2240,6 @@ bool smu_v13_0_baco_is_support(struct smu_context *smu)
 	if (amdgpu_sriov_vf(smu->adev) ||
 	    !smu_baco->platform_support)
 		return false;
-
-	/* return true if ASIC is in BACO state already */
-	if (smu_v13_0_baco_get_state(smu) == SMU_BACO_STATE_ENTER)
-		return true;
 
 	if (smu_cmn_feature_is_supported(smu, SMU_FEATURE_BACO_BIT) &&
 	    !smu_cmn_feature_is_enabled(smu, SMU_FEATURE_BACO_BIT))

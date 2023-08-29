@@ -3,7 +3,6 @@ menu "Device Drivers"
 
 # Keep I/O buses first
 
-
 source "drivers/amba/Kconfig"
 source "drivers/eisa/Kconfig"
 source "drivers/pci/Kconfig"
@@ -206,7 +205,7 @@ source "drivers/thunderbolt/Kconfig"
 
 source "drivers/android/Kconfig"
 
-#source "drivers/gpu/trace/Kconfig"
+source "drivers/gpu/trace/Kconfig"
 
 source "drivers/nvdimm/Kconfig"
 

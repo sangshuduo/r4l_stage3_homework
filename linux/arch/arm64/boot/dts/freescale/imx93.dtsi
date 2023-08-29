@@ -451,7 +451,7 @@
 			clocks = <&clk IMX93_CLK_GPIO2_GATE>,
 				 <&clk IMX93_CLK_GPIO2_GATE>;
 			clock-names = "gpio", "port";
-			gpio-ranges = <&iomuxc 0 4 30>;
+			gpio-ranges = <&iomuxc 0 32 32>;
 		};
 
 		gpio3: gpio@43820080 {
@@ -465,8 +465,7 @@
 			clocks = <&clk IMX93_CLK_GPIO3_GATE>,
 				 <&clk IMX93_CLK_GPIO3_GATE>;
 			clock-names = "gpio", "port";
-			gpio-ranges = <&iomuxc 0 84 8>, <&iomuxc 8 66 18>,
-				      <&iomuxc 26 34 2>, <&iomuxc 28 0 4>;
+			gpio-ranges = <&iomuxc 0 64 32>;
 		};
 
 		gpio4: gpio@43830080 {
@@ -480,7 +479,7 @@
 			clocks = <&clk IMX93_CLK_GPIO4_GATE>,
 				 <&clk IMX93_CLK_GPIO4_GATE>;
 			clock-names = "gpio", "port";
-			gpio-ranges = <&iomuxc 0 38 28>, <&iomuxc 28 36 2>;
+			gpio-ranges = <&iomuxc 0 96 32>;
 		};
 
 		gpio1: gpio@47400080 {
@@ -494,7 +493,7 @@
 			clocks = <&clk IMX93_CLK_GPIO1_GATE>,
 				 <&clk IMX93_CLK_GPIO1_GATE>;
 			clock-names = "gpio", "port";
-			gpio-ranges = <&iomuxc 0 92 16>;
+			gpio-ranges = <&iomuxc 0 0 32>;
 		};
 
 		s4muap: mailbox@47520000 {
@@ -502,7 +501,7 @@
 			reg = <0x47520000 0x10000>;
 			interrupts = <GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>,
 				     <GIC_SPI 30 IRQ_TYPE_LEVEL_HIGH>;
-			interrupt-names = "tx", "rx";
+			interrupt-names = "txirq", "rxirq";
 			#mbox-cells = <2>;
 		};
 

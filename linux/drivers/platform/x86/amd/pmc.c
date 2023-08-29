@@ -22,7 +22,6 @@
 #include <linux/pci.h>
 #include <linux/platform_device.h>
 #include <linux/rtc.h>
-#include <linux/serio.h>
 #include <linux/suspend.h>
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
@@ -277,6 +276,7 @@ static const struct file_operations amd_pmc_stb_debugfs_fops_v2 = {
 	.release = amd_pmc_stb_debugfs_release_v2,
 };
 
+#if defined(CONFIG_SUSPEND) || defined(CONFIG_DEBUG_FS)
 static int amd_pmc_setup_smu_logging(struct amd_pmc_dev *dev)
 {
 	if (dev->cpu_id == AMD_CPU_ID_PCO) {
@@ -351,6 +351,7 @@ static int get_metrics_table(struct amd_pmc_dev *pdev, struct smu_metrics *table
 	memcpy_fromio(table, pdev->smu_virt_addr, sizeof(struct smu_metrics));
 	return 0;
 }
+#endif /* CONFIG_SUSPEND || CONFIG_DEBUG_FS */
 
 #ifdef CONFIG_SUSPEND
 static void amd_pmc_validate_deepest(struct amd_pmc_dev *pdev)
@@ -654,33 +655,6 @@ static int amd_pmc_get_os_hint(struct amd_pmc_dev *dev)
 	return -EINVAL;
 }
 
-static int amd_pmc_czn_wa_irq1(struct amd_pmc_dev *pdev)
-{
-	struct device *d;
-	int rc;
-
-	if (!pdev->major) {
-		rc = amd_pmc_get_smu_version(pdev);
-		if (rc)
-			return rc;
-	}
-
-	if (pdev->major > 64 || (pdev->major == 64 && pdev->minor > 65))
-		return 0;
-
-	d = bus_find_device_by_name(&serio_bus, NULL, "serio0");
-	if (!d)
-		return 0;
-	if (device_may_wakeup(d)) {
-		dev_info_once(d, "Disabling IRQ1 wakeup source to avoid platform firmware bug\n");
-		disable_irq_wake(1);
-		device_set_wakeup_enable(d, false);
-	}
-	put_device(d);
-
-	return 0;
-}
-
 static int amd_pmc_verify_czn_rtc(struct amd_pmc_dev *pdev, u32 *arg)
 {
 	struct rtc_device *rtc_device;
@@ -688,13 +662,6 @@ static int amd_pmc_verify_czn_rtc(struct amd_pmc_dev *pdev, u32 *arg)
 	struct rtc_wkalrm alarm;
 	struct rtc_time tm;
 	int rc;
-
-	/* we haven't yet read SMU version */
-	if (!pdev->major) {
-		rc = amd_pmc_get_smu_version(pdev);
-		if (rc)
-			return rc;
-	}
 
 	if (pdev->major < 64 || (pdev->major == 64 && pdev->minor < 53))
 		return 0;
@@ -767,13 +734,7 @@ static void amd_pmc_s2idle_prepare(void)
 static void amd_pmc_s2idle_check(void)
 {
 	struct amd_pmc_dev *pdev = &pmc;
-	struct smu_metrics table;
 	int rc;
-
-	/* CZN: Ensure that future s0i3 entry attempts at least 10ms passed */
-	if (pdev->cpu_id == AMD_CPU_ID_CZN && !get_metrics_table(pdev, &table) &&
-	    table.s0i3_last_entry_status)
-		usleep_range(10000, 20000);
 
 	/* Dump the IdleMask before we add to the STB */
 	amd_pmc_idlemask_read(pdev, pdev->dev, NULL);
@@ -810,25 +771,6 @@ static struct acpi_s2idle_dev_ops amd_pmc_s2idle_dev_ops = {
 	.check = amd_pmc_s2idle_check,
 	.restore = amd_pmc_s2idle_restore,
 };
-
-static int __maybe_unused amd_pmc_suspend_handler(struct device *dev)
-{
-	struct amd_pmc_dev *pdev = dev_get_drvdata(dev);
-
-	if (pdev->cpu_id == AMD_CPU_ID_CZN) {
-		int rc = amd_pmc_czn_wa_irq1(pdev);
-
-		if (rc) {
-			dev_err(pdev->dev, "failed to adjust keyboard wakeup: %d\n", rc);
-			return rc;
-		}
-	}
-
-	return 0;
-}
-
-static SIMPLE_DEV_PM_OPS(amd_pmc_pm, amd_pmc_suspend_handler, NULL);
-
 #endif
 
 static const struct pci_device_id pmc_pci_ids[] = {
@@ -979,7 +921,7 @@ static int amd_pmc_probe(struct platform_device *pdev)
 	if (enable_stb && (dev->cpu_id == AMD_CPU_ID_YC || dev->cpu_id == AMD_CPU_ID_CB)) {
 		err = amd_pmc_s2d_init(dev);
 		if (err)
-			goto err_pci_dev_put;
+			return err;
 	}
 
 	platform_set_drvdata(pdev, dev);
@@ -1015,7 +957,6 @@ static const struct acpi_device_id amd_pmc_acpi_ids[] = {
 	{"AMDI0006", 0},
 	{"AMDI0007", 0},
 	{"AMDI0008", 0},
-	{"AMDI0009", 0},
 	{"AMD0004", 0},
 	{"AMD0005", 0},
 	{ }
@@ -1027,9 +968,6 @@ static struct platform_driver amd_pmc_driver = {
 		.name = "amd_pmc",
 		.acpi_match_table = amd_pmc_acpi_ids,
 		.dev_groups = pmc_groups,
-#ifdef CONFIG_SUSPEND
-		.pm = &amd_pmc_pm,
-#endif
 	},
 	.probe = amd_pmc_probe,
 	.remove = amd_pmc_remove,

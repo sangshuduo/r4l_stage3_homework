@@ -206,11 +206,10 @@ static void mlx5e_disable_blocking_events(struct mlx5e_priv *priv)
 static u16 mlx5e_mpwrq_umr_octowords(u32 entries, enum mlx5e_mpwrq_umr_mode umr_mode)
 {
 	u8 umr_entry_size = mlx5e_mpwrq_umr_entry_size(umr_mode);
-	u32 sz;
 
-	sz = ALIGN(entries * umr_entry_size, MLX5_UMR_MTT_ALIGNMENT);
+	WARN_ON_ONCE(entries * umr_entry_size % MLX5_OCTWORD);
 
-	return sz / MLX5_OCTWORD;
+	return entries * umr_entry_size / MLX5_OCTWORD;
 }
 
 static inline void mlx5e_build_umr_wqe(struct mlx5e_rq *rq,
@@ -591,8 +590,7 @@ static int mlx5e_init_rxq_rq(struct mlx5e_channel *c, struct mlx5e_params *param
 	rq->ix           = c->ix;
 	rq->channel      = c;
 	rq->mdev         = mdev;
-	rq->hw_mtu =
-		MLX5E_SW2HW_MTU(params, params->sw_mtu) - ETH_FCS_LEN * !params->scatter_fcs_en;
+	rq->hw_mtu       = MLX5E_SW2HW_MTU(params, params->sw_mtu);
 	rq->xdpsq        = &c->rq_xdpsq;
 	rq->stats        = &c->priv->channel_stats[c->ix]->rq;
 	rq->ptp_cyc2time = mlx5_rq_ts_translator(mdev);
@@ -1015,6 +1013,35 @@ int mlx5e_flush_rq(struct mlx5e_rq *rq, int curr_state)
 	return mlx5e_rq_to_ready(rq, curr_state);
 }
 
+static int mlx5e_modify_rq_scatter_fcs(struct mlx5e_rq *rq, bool enable)
+{
+	struct mlx5_core_dev *mdev = rq->mdev;
+
+	void *in;
+	void *rqc;
+	int inlen;
+	int err;
+
+	inlen = MLX5_ST_SZ_BYTES(modify_rq_in);
+	in = kvzalloc(inlen, GFP_KERNEL);
+	if (!in)
+		return -ENOMEM;
+
+	rqc = MLX5_ADDR_OF(modify_rq_in, in, ctx);
+
+	MLX5_SET(modify_rq_in, in, rq_state, MLX5_RQC_STATE_RDY);
+	MLX5_SET64(modify_rq_in, in, modify_bitmask,
+		   MLX5_MODIFY_RQ_IN_MODIFY_BITMASK_SCATTER_FCS);
+	MLX5_SET(rqc, rqc, scatter_fcs, enable);
+	MLX5_SET(rqc, rqc, state, MLX5_RQC_STATE_RDY);
+
+	err = mlx5_core_modify_rq(mdev, rq->rqn, in);
+
+	kvfree(in);
+
+	return err;
+}
+
 static int mlx5e_modify_rq_vsd(struct mlx5e_rq *rq, bool vsd)
 {
 	struct mlx5_core_dev *mdev = rq->mdev;
@@ -1270,7 +1297,7 @@ static int mlx5e_alloc_xdpsq(struct mlx5e_channel *c,
 	sq->channel   = c;
 	sq->uar_map   = mdev->mlx5e_res.hw_objs.bfreg.map;
 	sq->min_inline_mode = params->tx_min_inline_mode;
-	sq->hw_mtu    = MLX5E_SW2HW_MTU(params, params->sw_mtu) - ETH_FCS_LEN;
+	sq->hw_mtu    = MLX5E_SW2HW_MTU(params, params->sw_mtu);
 	sq->xsk_pool  = xsk_pool;
 
 	sq->stats = sq->xsk_pool ?
@@ -3273,6 +3300,20 @@ static void mlx5e_cleanup_nic_tx(struct mlx5e_priv *priv)
 	mlx5e_destroy_tises(priv);
 }
 
+static int mlx5e_modify_channels_scatter_fcs(struct mlx5e_channels *chs, bool enable)
+{
+	int err = 0;
+	int i;
+
+	for (i = 0; i < chs->num; i++) {
+		err = mlx5e_modify_rq_scatter_fcs(&chs->c[i]->rq, enable);
+		if (err)
+			return err;
+	}
+
+	return 0;
+}
+
 static int mlx5e_modify_channels_vsd(struct mlx5e_channels *chs, bool vsd)
 {
 	int err;
@@ -3848,27 +3889,41 @@ static int mlx5e_set_rx_port_ts(struct mlx5_core_dev *mdev, bool enable)
 	return mlx5_set_ports_check(mdev, in, sizeof(in));
 }
 
-static int mlx5e_set_rx_port_ts_wrap(struct mlx5e_priv *priv, void *ctx)
-{
-	struct mlx5_core_dev *mdev = priv->mdev;
-	bool enable = *(bool *)ctx;
-
-	return mlx5e_set_rx_port_ts(mdev, enable);
-}
-
 static int set_feature_rx_fcs(struct net_device *netdev, bool enable)
 {
 	struct mlx5e_priv *priv = netdev_priv(netdev);
 	struct mlx5e_channels *chs = &priv->channels;
-	struct mlx5e_params new_params;
+	struct mlx5_core_dev *mdev = priv->mdev;
 	int err;
 
 	mutex_lock(&priv->state_lock);
 
-	new_params = chs->params;
-	new_params.scatter_fcs_en = enable;
-	err = mlx5e_safe_switch_params(priv, &new_params, mlx5e_set_rx_port_ts_wrap,
-				       &new_params.scatter_fcs_en, true);
+	if (enable) {
+		err = mlx5e_set_rx_port_ts(mdev, false);
+		if (err)
+			goto out;
+
+		chs->params.scatter_fcs_en = true;
+		err = mlx5e_modify_channels_scatter_fcs(chs, true);
+		if (err) {
+			chs->params.scatter_fcs_en = false;
+			mlx5e_set_rx_port_ts(mdev, true);
+		}
+	} else {
+		chs->params.scatter_fcs_en = false;
+		err = mlx5e_modify_channels_scatter_fcs(chs, false);
+		if (err) {
+			chs->params.scatter_fcs_en = true;
+			goto out;
+		}
+		err = mlx5e_set_rx_port_ts(mdev, true);
+		if (err) {
+			mlx5_core_warn(mdev, "Failed to set RX port timestamp %d\n", err);
+			err = 0;
+		}
+	}
+
+out:
 	mutex_unlock(&priv->state_lock);
 	return err;
 }
@@ -4005,10 +4060,6 @@ static netdev_features_t mlx5e_fix_uplink_rep_features(struct net_device *netdev
 	if (netdev->features & NETIF_F_GRO_HW)
 		netdev_warn(netdev, "Disabling HW_GRO, not supported in switchdev mode\n");
 
-	features &= ~NETIF_F_HW_VLAN_CTAG_FILTER;
-	if (netdev->features & NETIF_F_HW_VLAN_CTAG_FILTER)
-		netdev_warn(netdev, "Disabling HW_VLAN CTAG FILTERING, not supported in switchdev mode\n");
-
 	return features;
 }
 
@@ -4018,9 +4069,6 @@ static netdev_features_t mlx5e_fix_features(struct net_device *netdev,
 	struct mlx5e_priv *priv = netdev_priv(netdev);
 	struct mlx5e_vlan_table *vlan;
 	struct mlx5e_params *params;
-
-	if (!netif_device_present(netdev))
-		return features;
 
 	vlan = mlx5e_fs_get_vlan(priv->fs);
 	mutex_lock(&priv->state_lock);
@@ -5645,13 +5693,6 @@ int mlx5e_attach_netdev(struct mlx5e_priv *priv)
 	if (priv->fs)
 		mlx5e_fs_set_state_destroy(priv->fs,
 					   !test_bit(MLX5E_STATE_DESTROYING, &priv->state));
-
-	/* Validate the max_wqe_size_sq capability. */
-	if (WARN_ON_ONCE(mlx5e_get_max_sq_wqebbs(priv->mdev) < MLX5E_MAX_TX_WQEBBS)) {
-		mlx5_core_warn(priv->mdev, "MLX5E: Max SQ WQEBBs firmware capability: %u, needed %lu\n",
-			       mlx5e_get_max_sq_wqebbs(priv->mdev), MLX5E_MAX_TX_WQEBBS);
-		return -EIO;
-	}
 
 	/* max number of channels may have changed */
 	max_nch = mlx5e_calc_max_nch(priv->mdev, priv->netdev, profile);

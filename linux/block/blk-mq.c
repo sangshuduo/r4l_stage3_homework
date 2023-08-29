@@ -611,7 +611,6 @@ struct request *blk_mq_alloc_request_hctx(struct request_queue *q,
 		.nr_tags	= 1,
 	};
 	u64 alloc_time_ns = 0;
-	struct request *rq;
 	unsigned int cpu;
 	unsigned int tag;
 	int ret;
@@ -661,12 +660,8 @@ struct request *blk_mq_alloc_request_hctx(struct request_queue *q,
 	tag = blk_mq_get_tag(&data);
 	if (tag == BLK_MQ_NO_TAG)
 		goto out_queue_exit;
-	rq = blk_mq_rq_ctx_init(&data, blk_mq_tags_from_data(&data), tag,
+	return blk_mq_rq_ctx_init(&data, blk_mq_tags_from_data(&data), tag,
 					alloc_time_ns);
-	rq->__data_len = 0;
-	rq->__sector = (sector_t) -1;
-	rq->bio = rq->biotail = NULL;
-	return rq;
 
 out_queue_exit:
 	blk_queue_exit(q);
@@ -1262,7 +1257,6 @@ static void blk_add_rq_to_plug(struct blk_plug *plug, struct request *rq)
 		   (!blk_queue_nomerges(rq->q) &&
 		    blk_rq_bytes(last) >= BLK_PLUG_FLUSH_SIZE)) {
 		blk_mq_flush_plug_list(plug, false);
-		last = NULL;
 		trace_block_plug(rq->q);
 	}
 
@@ -1529,13 +1523,7 @@ static void blk_mq_rq_timed_out(struct request *req)
 	blk_add_timer(req);
 }
 
-struct blk_expired_data {
-	bool has_timedout_rq;
-	unsigned long next;
-	unsigned long timeout_start;
-};
-
-static bool blk_mq_req_expired(struct request *rq, struct blk_expired_data *expired)
+static bool blk_mq_req_expired(struct request *rq, unsigned long *next)
 {
 	unsigned long deadline;
 
@@ -1545,13 +1533,13 @@ static bool blk_mq_req_expired(struct request *rq, struct blk_expired_data *expi
 		return false;
 
 	deadline = READ_ONCE(rq->deadline);
-	if (time_after_eq(expired->timeout_start, deadline))
+	if (time_after_eq(jiffies, deadline))
 		return true;
 
-	if (expired->next == 0)
-		expired->next = deadline;
-	else if (time_after(expired->next, deadline))
-		expired->next = deadline;
+	if (*next == 0)
+		*next = deadline;
+	else if (time_after(*next, deadline))
+		*next = deadline;
 	return false;
 }
 
@@ -1567,7 +1555,7 @@ void blk_mq_put_rq_ref(struct request *rq)
 
 static bool blk_mq_check_expired(struct request *rq, void *priv)
 {
-	struct blk_expired_data *expired = priv;
+	unsigned long *next = priv;
 
 	/*
 	 * blk_mq_queue_tag_busy_iter() has locked the request, so it cannot
@@ -1576,18 +1564,7 @@ static bool blk_mq_check_expired(struct request *rq, void *priv)
 	 * it was completed and reallocated as a new request after returning
 	 * from blk_mq_check_expired().
 	 */
-	if (blk_mq_req_expired(rq, expired)) {
-		expired->has_timedout_rq = true;
-		return false;
-	}
-	return true;
-}
-
-static bool blk_mq_handle_expired(struct request *rq, void *priv)
-{
-	struct blk_expired_data *expired = priv;
-
-	if (blk_mq_req_expired(rq, expired))
+	if (blk_mq_req_expired(rq, next))
 		blk_mq_rq_timed_out(rq);
 	return true;
 }
@@ -1596,9 +1573,7 @@ static void blk_mq_timeout_work(struct work_struct *work)
 {
 	struct request_queue *q =
 		container_of(work, struct request_queue, timeout_work);
-	struct blk_expired_data expired = {
-		.timeout_start = jiffies,
-	};
+	unsigned long next = 0;
 	struct blk_mq_hw_ctx *hctx;
 	unsigned long i;
 
@@ -1618,23 +1593,10 @@ static void blk_mq_timeout_work(struct work_struct *work)
 	if (!percpu_ref_tryget(&q->q_usage_counter))
 		return;
 
-	/* check if there is any timed-out request */
-	blk_mq_queue_tag_busy_iter(q, blk_mq_check_expired, &expired);
-	if (expired.has_timedout_rq) {
-		/*
-		 * Before walking tags, we must ensure any submit started
-		 * before the current time has finished. Since the submit
-		 * uses srcu or rcu, wait for a synchronization point to
-		 * ensure all running submits have finished
-		 */
-		blk_mq_wait_quiesce_done(q);
+	blk_mq_queue_tag_busy_iter(q, blk_mq_check_expired, &next);
 
-		expired.next = 0;
-		blk_mq_queue_tag_busy_iter(q, blk_mq_handle_expired, &expired);
-	}
-
-	if (expired.next != 0) {
-		mod_timer(&q->timeout, expired.next);
+	if (next != 0) {
+		mod_timer(&q->timeout, next);
 	} else {
 		/*
 		 * Request timeouts are handled as a forward rolling timer. If
@@ -2858,7 +2820,6 @@ static inline struct request *blk_mq_get_cached_request(struct request_queue *q,
 		struct blk_plug *plug, struct bio **bio, unsigned int nsegs)
 {
 	struct request *rq;
-	enum hctx_type type, hctx_type;
 
 	if (!plug)
 		return NULL;
@@ -2871,10 +2832,7 @@ static inline struct request *blk_mq_get_cached_request(struct request_queue *q,
 		return NULL;
 	}
 
-	type = blk_mq_get_hctx_type((*bio)->bi_opf);
-	hctx_type = rq->mq_hctx->type;
-	if (type != hctx_type &&
-	    !(type == HCTX_TYPE_READ && hctx_type == HCTX_TYPE_DEFAULT))
+	if (blk_mq_get_hctx_type((*bio)->bi_opf) != rq->mq_hctx->type)
 		return NULL;
 	if (op_is_flush(rq->cmd_flags) != op_is_flush((*bio)->bi_opf))
 		return NULL;
@@ -2923,11 +2881,8 @@ void blk_mq_submit_bio(struct bio *bio)
 	blk_status_t ret;
 
 	bio = blk_queue_bounce(bio, q);
-	if (bio_may_exceed_limits(bio, &q->limits)) {
+	if (bio_may_exceed_limits(bio, &q->limits))
 		bio = __bio_split_to_limits(bio, &q->limits, &nr_segs);
-		if (!bio)
-			return;
-	}
 
 	if (!bio_integrity_prep(bio))
 		return;
@@ -3157,11 +3112,8 @@ static void blk_mq_clear_rq_mapping(struct blk_mq_tags *drv_tags,
 	struct page *page;
 	unsigned long flags;
 
-	/*
-	 * There is no need to clear mapping if driver tags is not initialized
-	 * or the mapping belongs to the driver tags.
-	 */
-	if (!drv_tags || drv_tags == tags)
+	/* There is no need to clear a driver tags own mapping */
+	if (drv_tags == tags)
 		return;
 
 	list_for_each_entry(page, &tags->page_list, lru) {
@@ -4084,14 +4036,9 @@ EXPORT_SYMBOL(__blk_mq_alloc_disk);
 struct gendisk *blk_mq_alloc_disk_for_queue(struct request_queue *q,
 		struct lock_class_key *lkclass)
 {
-	struct gendisk *disk;
-
 	if (!blk_get_queue(q))
 		return NULL;
-	disk = __alloc_disk_node(q, NUMA_NO_NODE, lkclass);
-	if (!disk)
-		blk_put_queue(q);
-	return disk;
+	return __alloc_disk_node(q, NUMA_NO_NODE, lkclass);
 }
 EXPORT_SYMBOL(blk_mq_alloc_disk_for_queue);
 
@@ -4238,7 +4185,9 @@ int blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 	return 0;
 
 err_hctxs:
-	blk_mq_release(q);
+	xa_destroy(&q->hctx_table);
+	q->nr_hw_queues = 0;
+	blk_mq_sysfs_deinit(q);
 err_poll:
 	blk_stat_free_callback(q->poll_cb);
 	q->poll_cb = NULL;

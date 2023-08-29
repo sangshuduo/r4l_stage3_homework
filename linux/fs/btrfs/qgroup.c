@@ -2751,19 +2751,9 @@ int btrfs_qgroup_account_extents(struct btrfs_trans_handle *trans)
 			      BTRFS_QGROUP_RUNTIME_FLAG_NO_ACCOUNTING)) {
 			/*
 			 * Old roots should be searched when inserting qgroup
-			 * extent record.
-			 *
-			 * But for INCONSISTENT (NO_ACCOUNTING) -> rescan case,
-			 * we may have some record inserted during
-			 * NO_ACCOUNTING (thus no old_roots populated), but
-			 * later we start rescan, which clears NO_ACCOUNTING,
-			 * leaving some inserted records without old_roots
-			 * populated.
-			 *
-			 * Those cases are rare and should not cause too much
-			 * time spent during commit_transaction().
+			 * extent record
 			 */
-			if (!record->old_roots) {
+			if (WARN_ON(!record->old_roots)) {
 				/* Search commit root to find old_roots */
 				ret = btrfs_find_all_roots(NULL, fs_info,
 						record->bytenr, 0,
@@ -2961,7 +2951,14 @@ int btrfs_qgroup_inherit(struct btrfs_trans_handle *trans, u64 srcid,
 		dstgroup->rsv_rfer = inherit->lim.rsv_rfer;
 		dstgroup->rsv_excl = inherit->lim.rsv_excl;
 
-		qgroup_dirty(fs_info, dstgroup);
+		ret = update_qgroup_limit_item(trans, dstgroup);
+		if (ret) {
+			qgroup_mark_inconsistent(fs_info);
+			btrfs_info(fs_info,
+				   "unable to update quota limit for %llu",
+				   dstgroup->qgroupid);
+			goto unlock;
+		}
 	}
 
 	if (srcid) {
@@ -3348,7 +3345,6 @@ static void btrfs_qgroup_rescan_worker(struct btrfs_work *work)
 	int err = -ENOMEM;
 	int ret = 0;
 	bool stopped = false;
-	bool did_leaf_rescans = false;
 
 	path = btrfs_alloc_path();
 	if (!path)
@@ -3369,7 +3365,6 @@ static void btrfs_qgroup_rescan_worker(struct btrfs_work *work)
 		}
 
 		err = qgroup_rescan_leaf(trans, path);
-		did_leaf_rescans = true;
 
 		if (err > 0)
 			btrfs_commit_transaction(trans);
@@ -3390,23 +3385,16 @@ out:
 	mutex_unlock(&fs_info->qgroup_rescan_lock);
 
 	/*
-	 * Only update status, since the previous part has already updated the
-	 * qgroup info, and only if we did any actual work. This also prevents
-	 * race with a concurrent quota disable, which has already set
-	 * fs_info->quota_root to NULL and cleared BTRFS_FS_QUOTA_ENABLED at
-	 * btrfs_quota_disable().
+	 * only update status, since the previous part has already updated the
+	 * qgroup info.
 	 */
-	if (did_leaf_rescans) {
-		trans = btrfs_start_transaction(fs_info->quota_root, 1);
-		if (IS_ERR(trans)) {
-			err = PTR_ERR(trans);
-			trans = NULL;
-			btrfs_err(fs_info,
-				  "fail to start transaction for status update: %d",
-				  err);
-		}
-	} else {
+	trans = btrfs_start_transaction(fs_info->quota_root, 1);
+	if (IS_ERR(trans)) {
+		err = PTR_ERR(trans);
 		trans = NULL;
+		btrfs_err(fs_info,
+			  "fail to start transaction for status update: %d",
+			  err);
 	}
 
 	mutex_lock(&fs_info->qgroup_rescan_lock);

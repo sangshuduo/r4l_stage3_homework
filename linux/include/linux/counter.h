@@ -542,10 +542,11 @@ struct counter_array {
 #define DEFINE_COUNTER_ARRAY_CAPTURE(_name, _length) \
 	DEFINE_COUNTER_ARRAY_U64(_name, _length)
 
-#define DEFINE_COUNTER_ARRAY_POLARITY(_name, _available, _length) \
+#define DEFINE_COUNTER_ARRAY_POLARITY(_name, _enums, _length) \
+	DEFINE_COUNTER_AVAILABLE(_name##_available, _enums); \
 	struct counter_array _name = { \
 		.type = COUNTER_COMP_SIGNAL_POLARITY, \
-		.avail = &(_available), \
+		.avail = &(_name##_available), \
 		.length = (_length), \
 	}
 

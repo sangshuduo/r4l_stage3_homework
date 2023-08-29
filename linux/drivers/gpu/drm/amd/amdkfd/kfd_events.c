@@ -506,13 +506,14 @@ int kfd_criu_restore_event(struct file *devkfd,
 		ret = create_other_event(p, ev, &ev_priv->event_id);
 		break;
 	}
-	mutex_unlock(&p->event_mutex);
 
 exit:
 	if (ret)
 		kfree(ev);
 
 	kfree(ev_priv);
+
+	mutex_unlock(&p->event_mutex);
 
 	return ret;
 }

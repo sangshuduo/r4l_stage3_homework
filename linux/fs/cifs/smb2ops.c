@@ -539,7 +539,6 @@ parse_server_interfaces(struct network_interface_info_ioctl_rsp *buf,
 				 iface_head) {
 		iface->is_active = 0;
 		kref_put(&iface->refcount, release_iface);
-		ses->iface_count--;
 	}
 	spin_unlock(&ses->iface_lock);
 
@@ -618,7 +617,6 @@ parse_server_interfaces(struct network_interface_info_ioctl_rsp *buf,
 				/* just get a ref so that it doesn't get picked/freed */
 				iface->is_active = 1;
 				kref_get(&iface->refcount);
-				ses->iface_count++;
 				spin_unlock(&ses->iface_lock);
 				goto next_iface;
 			} else if (ret < 0) {
@@ -653,9 +651,9 @@ parse_server_interfaces(struct network_interface_info_ioctl_rsp *buf,
 			kref_put(&iface->refcount, release_iface);
 		} else
 			list_add_tail(&info->iface_head, &ses->iface_list);
+		spin_unlock(&ses->iface_lock);
 
 		ses->iface_count++;
-		spin_unlock(&ses->iface_lock);
 		ses->iface_last_update = jiffies;
 next_iface:
 		nb_iface++;
@@ -797,9 +795,7 @@ smb2_is_path_accessible(const unsigned int xid, struct cifs_tcon *tcon,
 	int rc;
 	__le16 *utf16_path;
 	__u8 oplock = SMB2_OPLOCK_LEVEL_NONE;
-	int err_buftype = CIFS_NO_BUFFER;
 	struct cifs_open_parms oparms;
-	struct kvec err_iov = {};
 	struct cifs_fid fid;
 	struct cached_fid *cfid;
 
@@ -823,32 +819,14 @@ smb2_is_path_accessible(const unsigned int xid, struct cifs_tcon *tcon,
 	oparms.fid = &fid;
 	oparms.reconnect = false;
 
-	rc = SMB2_open(xid, &oparms, utf16_path, &oplock, NULL, NULL,
-		       &err_iov, &err_buftype);
+	rc = SMB2_open(xid, &oparms, utf16_path, &oplock, NULL, NULL, NULL,
+		       NULL);
 	if (rc) {
-		struct smb2_hdr *hdr = err_iov.iov_base;
-
-		if (unlikely(!hdr || err_buftype == CIFS_NO_BUFFER))
-			goto out;
-		/*
-		 * Handle weird Windows SMB server behaviour. It responds with
-		 * STATUS_OBJECT_NAME_INVALID code to SMB2 QUERY_INFO request
-		 * for "\<server>\<dfsname>\<linkpath>" DFS reference,
-		 * where <dfsname> contains non-ASCII unicode symbols.
-		 */
-		if (rc != -EREMOTE && IS_ENABLED(CONFIG_CIFS_DFS_UPCALL) &&
-		    hdr->Status == STATUS_OBJECT_NAME_INVALID)
-			rc = -EREMOTE;
-		if (rc == -EREMOTE && IS_ENABLED(CONFIG_CIFS_DFS_UPCALL) && cifs_sb &&
-		    (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_DFS))
-			rc = -EOPNOTSUPP;
-		goto out;
+		kfree(utf16_path);
+		return rc;
 	}
 
 	rc = SMB2_close(xid, tcon, fid.persistent_fid, fid.volatile_fid);
-
-out:
-	free_rsp_buf(err_buftype, err_iov.iov_base);
 	kfree(utf16_path);
 	return rc;
 }
@@ -1137,8 +1115,6 @@ smb2_set_ea(const unsigned int xid, struct cifs_tcon *tcon,
 				COMPOUND_FID, current->tgid,
 				FILE_FULL_EA_INFORMATION,
 				SMB2_O_INFO_FILE, 0, data, size);
-	if (rc)
-		goto sea_exit;
 	smb2_set_next_command(tcon, &rqst[1]);
 	smb2_set_related(&rqst[1]);
 
@@ -1149,8 +1125,6 @@ smb2_set_ea(const unsigned int xid, struct cifs_tcon *tcon,
 	rqst[2].rq_nvec = 1;
 	rc = SMB2_close_init(tcon, server,
 			     &rqst[2], COMPOUND_FID, COMPOUND_FID, false);
-	if (rc)
-		goto sea_exit;
 	smb2_set_related(&rqst[2]);
 
 	rc = compound_send_recv(xid, ses, server,
@@ -2327,18 +2301,14 @@ static void
 smb2_is_network_name_deleted(char *buf, struct TCP_Server_Info *server)
 {
 	struct smb2_hdr *shdr = (struct smb2_hdr *)buf;
-	struct TCP_Server_Info *pserver;
 	struct cifs_ses *ses;
 	struct cifs_tcon *tcon;
 
 	if (shdr->Status != STATUS_NETWORK_NAME_DELETED)
 		return;
 
-	/* If server is a channel, select the primary channel */
-	pserver = CIFS_SERVER_IS_CHAN(server) ? server->primary_server : server;
-
 	spin_lock(&cifs_tcp_ses_lock);
-	list_for_each_entry(ses, &pserver->smb_ses_list, smb_ses_list) {
+	list_for_each_entry(ses, &server->smb_ses_list, smb_ses_list) {
 		list_for_each_entry(tcon, &ses->tcon_list, tcon_list) {
 			if (tcon->tid == le32_to_cpu(shdr->Id.SyncId.TreeId)) {
 				spin_lock(&tcon->tc_lock);
@@ -4225,104 +4195,89 @@ fill_transform_hdr(struct smb2_transform_hdr *tr_hdr, unsigned int orig_len,
 	memcpy(&tr_hdr->SessionId, &shdr->SessionId, 8);
 }
 
-static void *smb2_aead_req_alloc(struct crypto_aead *tfm, const struct smb_rqst *rqst,
-				 int num_rqst, const u8 *sig, u8 **iv,
-				 struct aead_request **req, struct scatterlist **sgl,
-				 unsigned int *num_sgs)
+/* We can not use the normal sg_set_buf() as we will sometimes pass a
+ * stack object as buf.
+ */
+static inline void smb2_sg_set_buf(struct scatterlist *sg, const void *buf,
+				   unsigned int buflen)
 {
-	unsigned int req_size = sizeof(**req) + crypto_aead_reqsize(tfm);
-	unsigned int iv_size = crypto_aead_ivsize(tfm);
-	unsigned int len;
-	u8 *p;
-
-	*num_sgs = cifs_get_num_sgs(rqst, num_rqst, sig);
-
-	len = iv_size;
-	len += crypto_aead_alignmask(tfm) & ~(crypto_tfm_ctx_alignment() - 1);
-	len = ALIGN(len, crypto_tfm_ctx_alignment());
-	len += req_size;
-	len = ALIGN(len, __alignof__(struct scatterlist));
-	len += *num_sgs * sizeof(**sgl);
-
-	p = kmalloc(len, GFP_ATOMIC);
-	if (!p)
-		return NULL;
-
-	*iv = (u8 *)PTR_ALIGN(p, crypto_aead_alignmask(tfm) + 1);
-	*req = (struct aead_request *)PTR_ALIGN(*iv + iv_size,
-						crypto_tfm_ctx_alignment());
-	*sgl = (struct scatterlist *)PTR_ALIGN((u8 *)*req + req_size,
-					       __alignof__(struct scatterlist));
-	return p;
+	void *addr;
+	/*
+	 * VMAP_STACK (at least) puts stack into the vmalloc address space
+	 */
+	if (is_vmalloc_addr(buf))
+		addr = vmalloc_to_page(buf);
+	else
+		addr = virt_to_page(buf);
+	sg_set_page(sg, addr, buflen, offset_in_page(buf));
 }
 
-static void *smb2_get_aead_req(struct crypto_aead *tfm, const struct smb_rqst *rqst,
-			       int num_rqst, const u8 *sig, u8 **iv,
-			       struct aead_request **req, struct scatterlist **sgl)
+/* Assumes the first rqst has a transform header as the first iov.
+ * I.e.
+ * rqst[0].rq_iov[0]  is transform header
+ * rqst[0].rq_iov[1+] data to be encrypted/decrypted
+ * rqst[1+].rq_iov[0+] data to be encrypted/decrypted
+ */
+static struct scatterlist *
+init_sg(int num_rqst, struct smb_rqst *rqst, u8 *sign)
 {
-	unsigned int off, len, skip;
+	unsigned int sg_len;
 	struct scatterlist *sg;
-	unsigned int num_sgs;
-	unsigned long addr;
-	int i, j;
-	void *p;
+	unsigned int i;
+	unsigned int j;
+	unsigned int idx = 0;
+	int skip;
 
-	p = smb2_aead_req_alloc(tfm, rqst, num_rqst, sig, iv, req, sgl, &num_sgs);
-	if (!p)
+	sg_len = 1;
+	for (i = 0; i < num_rqst; i++)
+		sg_len += rqst[i].rq_nvec + rqst[i].rq_npages;
+
+	sg = kmalloc_array(sg_len, sizeof(struct scatterlist), GFP_KERNEL);
+	if (!sg)
 		return NULL;
 
-	sg_init_table(*sgl, num_sgs);
-	sg = *sgl;
-
-	/* Assumes the first rqst has a transform header as the first iov.
-	 * I.e.
-	 * rqst[0].rq_iov[0]  is transform header
-	 * rqst[0].rq_iov[1+] data to be encrypted/decrypted
-	 * rqst[1+].rq_iov[0+] data to be encrypted/decrypted
-	 */
+	sg_init_table(sg, sg_len);
 	for (i = 0; i < num_rqst; i++) {
-		/*
-		 * The first rqst has a transform header where the
-		 * first 20 bytes are not part of the encrypted blob.
-		 */
 		for (j = 0; j < rqst[i].rq_nvec; j++) {
-			struct kvec *iov = &rqst[i].rq_iov[j];
-
+			/*
+			 * The first rqst has a transform header where the
+			 * first 20 bytes are not part of the encrypted blob
+			 */
 			skip = (i == 0) && (j == 0) ? 20 : 0;
-			addr = (unsigned long)iov->iov_base + skip;
-			len = iov->iov_len - skip;
-			sg = cifs_sg_set_buf(sg, (void *)addr, len);
-		}
+			smb2_sg_set_buf(&sg[idx++],
+					rqst[i].rq_iov[j].iov_base + skip,
+					rqst[i].rq_iov[j].iov_len - skip);
+			}
+
 		for (j = 0; j < rqst[i].rq_npages; j++) {
-			rqst_page_get_length(&rqst[i], j, &len, &off);
-			sg_set_page(sg++, rqst[i].rq_pages[j], len, off);
+			unsigned int len, offset;
+
+			rqst_page_get_length(&rqst[i], j, &len, &offset);
+			sg_set_page(&sg[idx++], rqst[i].rq_pages[j], len, offset);
 		}
 	}
-	cifs_sg_set_buf(sg, sig, SMB2_SIGNATURE_SIZE);
-
-	return p;
+	smb2_sg_set_buf(&sg[idx], sign, SMB2_SIGNATURE_SIZE);
+	return sg;
 }
 
 static int
 smb2_get_enc_key(struct TCP_Server_Info *server, __u64 ses_id, int enc, u8 *key)
 {
-	struct TCP_Server_Info *pserver;
 	struct cifs_ses *ses;
 	u8 *ses_enc_key;
 
-	/* If server is a channel, select the primary channel */
-	pserver = CIFS_SERVER_IS_CHAN(server) ? server->primary_server : server;
-
 	spin_lock(&cifs_tcp_ses_lock);
-	list_for_each_entry(ses, &pserver->smb_ses_list, smb_ses_list) {
-		if (ses->Suid == ses_id) {
-			spin_lock(&ses->ses_lock);
-			ses_enc_key = enc ? ses->smb3encryptionkey :
-				ses->smb3decryptionkey;
-			memcpy(key, ses_enc_key, SMB3_ENC_DEC_KEY_SIZE);
-			spin_unlock(&ses->ses_lock);
-			spin_unlock(&cifs_tcp_ses_lock);
-			return 0;
+	list_for_each_entry(server, &cifs_tcp_ses_list, tcp_ses_list) {
+		list_for_each_entry(ses, &server->smb_ses_list, smb_ses_list) {
+			if (ses->Suid == ses_id) {
+				spin_lock(&ses->ses_lock);
+				ses_enc_key = enc ? ses->smb3encryptionkey :
+					ses->smb3decryptionkey;
+				memcpy(key, ses_enc_key, SMB3_ENC_DEC_KEY_SIZE);
+				spin_unlock(&ses->ses_lock);
+				spin_unlock(&cifs_tcp_ses_lock);
+				return 0;
+			}
 		}
 	}
 	spin_unlock(&cifs_tcp_ses_lock);
@@ -4348,11 +4303,11 @@ crypt_message(struct TCP_Server_Info *server, int num_rqst,
 	u8 sign[SMB2_SIGNATURE_SIZE] = {};
 	u8 key[SMB3_ENC_DEC_KEY_SIZE];
 	struct aead_request *req;
-	u8 *iv;
+	char *iv;
+	unsigned int iv_len;
 	DECLARE_CRYPTO_WAIT(wait);
 	struct crypto_aead *tfm;
 	unsigned int crypt_len = le32_to_cpu(tr_hdr->OriginalMessageSize);
-	void *creq;
 
 	rc = smb2_get_enc_key(server, le64_to_cpu(tr_hdr->SessionId), enc, key);
 	if (rc) {
@@ -4386,13 +4341,30 @@ crypt_message(struct TCP_Server_Info *server, int num_rqst,
 		return rc;
 	}
 
-	creq = smb2_get_aead_req(tfm, rqst, num_rqst, sign, &iv, &req, &sg);
-	if (unlikely(!creq))
+	req = aead_request_alloc(tfm, GFP_KERNEL);
+	if (!req) {
+		cifs_server_dbg(VFS, "%s: Failed to alloc aead request\n", __func__);
 		return -ENOMEM;
+	}
 
 	if (!enc) {
 		memcpy(sign, &tr_hdr->Signature, SMB2_SIGNATURE_SIZE);
 		crypt_len += SMB2_SIGNATURE_SIZE;
+	}
+
+	sg = init_sg(num_rqst, rqst, sign);
+	if (!sg) {
+		cifs_server_dbg(VFS, "%s: Failed to init sg\n", __func__);
+		rc = -ENOMEM;
+		goto free_req;
+	}
+
+	iv_len = crypto_aead_ivsize(tfm);
+	iv = kzalloc(iv_len, GFP_KERNEL);
+	if (!iv) {
+		cifs_server_dbg(VFS, "%s: Failed to alloc iv\n", __func__);
+		rc = -ENOMEM;
+		goto free_sg;
 	}
 
 	if ((server->cipher_type == SMB2_ENCRYPTION_AES128_GCM) ||
@@ -4403,7 +4375,6 @@ crypt_message(struct TCP_Server_Info *server, int num_rqst,
 		memcpy(iv + 1, (char *)tr_hdr->Nonce, SMB3_AES_CCM_NONCE);
 	}
 
-	aead_request_set_tfm(req, tfm);
 	aead_request_set_crypt(req, sg, sg, crypt_len, iv);
 	aead_request_set_ad(req, assoc_data_len);
 
@@ -4416,7 +4387,11 @@ crypt_message(struct TCP_Server_Info *server, int num_rqst,
 	if (!rc && enc)
 		memcpy(&tr_hdr->Signature, sign, SMB2_SIGNATURE_SIZE);
 
-	kfree_sensitive(creq);
+	kfree_sensitive(iv);
+free_sg:
+	kfree_sensitive(sg);
+free_req:
+	kfree_sensitive(req);
 	return rc;
 }
 
@@ -4737,13 +4712,13 @@ handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
 			return 0;
 		}
 
-		iov_iter_bvec(&iter, ITER_SOURCE, bvec, npages, data_len);
+		iov_iter_bvec(&iter, WRITE, bvec, npages, data_len);
 	} else if (buf_len >= data_offset + data_len) {
 		/* read response payload is in buf */
 		WARN_ONCE(npages > 0, "read data can be either in buf or in pages");
 		iov.iov_base = buf + data_offset;
 		iov.iov_len = data_len;
-		iov_iter_kvec(&iter, ITER_SOURCE, &iov, 1, data_len);
+		iov_iter_kvec(&iter, WRITE, &iov, 1, data_len);
 	} else {
 		/* read response payload cannot be in both buf and pages */
 		WARN_ONCE(1, "buf can not contain only a part of read data");

@@ -50,18 +50,16 @@ static inline bool exit_must_hard_disable(void)
  */
 static notrace __always_inline bool prep_irq_for_enabled_exit(bool restartable)
 {
-	bool must_hard_disable = (exit_must_hard_disable() || !restartable);
-
 	/* This must be done with RI=1 because tracing may touch vmaps */
 	trace_hardirqs_on();
 
-	if (must_hard_disable)
+	if (exit_must_hard_disable() || !restartable)
 		__hard_EE_RI_disable();
 
 #ifdef CONFIG_PPC64
 	/* This pattern matches prep_irq_for_idle */
 	if (unlikely(lazy_irq_pending_nocheck())) {
-		if (must_hard_disable) {
+		if (exit_must_hard_disable() || !restartable) {
 			local_paca->irq_happened |= PACA_IRQ_HARD_DIS;
 			__hard_RI_enable();
 		}
@@ -186,7 +184,7 @@ again:
 	ti_flags = read_thread_flags();
 	while (unlikely(ti_flags & (_TIF_USER_WORK_MASK & ~_TIF_RESTORE_TM))) {
 		local_irq_enable();
-		if (ti_flags & _TIF_NEED_RESCHED_MASK) {
+		if (ti_flags & _TIF_NEED_RESCHED) {
 			schedule();
 		} else {
 			/*
@@ -376,18 +374,10 @@ notrace unsigned long interrupt_exit_kernel_prepare(struct pt_regs *regs)
 	if (regs_is_unrecoverable(regs))
 		unrecoverable_exception(regs);
 	/*
-	 * CT_WARN_ON comes here via program_check_exception, so avoid
-	 * recursion.
-	 *
-	 * Skip the assertion on PMIs on 64e to work around a problem caused
-	 * by NMI PMIs incorrectly taking this interrupt return path, it's
-	 * possible for this to hit after interrupt exit to user switches
-	 * context to user. See also the comment in the performance monitor
-	 * handler in exceptions-64e.S
+	 * CT_WARN_ON comes here via program_check_exception,
+	 * so avoid recursion.
 	 */
-	if (!IS_ENABLED(CONFIG_PPC_BOOK3E_64) &&
-	    TRAP(regs) != INTERRUPT_PROGRAM &&
-	    TRAP(regs) != INTERRUPT_PERFMON)
+	if (TRAP(regs) != INTERRUPT_PROGRAM)
 		CT_WARN_ON(ct_state() == CONTEXT_USER);
 
 	kuap = kuap_get_and_assert_locked();
@@ -398,14 +388,10 @@ notrace unsigned long interrupt_exit_kernel_prepare(struct pt_regs *regs)
 		/* Returning to a kernel context with local irqs enabled. */
 		WARN_ON_ONCE(!(regs->msr & MSR_EE));
 again:
-		if (IS_ENABLED(CONFIG_PREEMPTION)) {
+		if (IS_ENABLED(CONFIG_PREEMPT)) {
 			/* Return to preemptible kernel context */
 			if (unlikely(read_thread_flags() & _TIF_NEED_RESCHED)) {
 				if (preempt_count() == 0)
-					preempt_schedule_irq();
-			} else if (unlikely(current_thread_info()->flags & _TIF_NEED_RESCHED_LAZY)) {
-				if ((preempt_count() == 0) &&
-				    (current_thread_info()->preempt_lazy_count == 0))
 					preempt_schedule_irq();
 			}
 		}

@@ -8,8 +8,6 @@ struct clk_hw;
 struct device;
 struct of_phandle_args;
 
-extern struct of_device_id __clk_of_table;
-
 #if defined(CONFIG_OF) && defined(CONFIG_COMMON_CLK)
 struct clk_hw *of_clk_get_hw(struct device_node *np,
 				    int index, const char *con_id);

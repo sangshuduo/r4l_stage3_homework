@@ -114,22 +114,6 @@ noinline void btrfs_release_path(struct btrfs_path *p)
 }
 
 /*
- * We want the transaction abort to print stack trace only for errors where the
- * cause could be a bug, eg. due to ENOSPC, and not for common errors that are
- * caused by external factors.
- */
-bool __cold abort_should_print_stack(int errno)
-{
-	switch (errno) {
-	case -EIO:
-	case -EROFS:
-	case -ENOMEM:
-		return false;
-	}
-	return true;
-}
-
-/*
  * safely gets a reference on the root node of a tree.  A lock
  * is not taken, so a concurrent writer may put a different node
  * at the root of the tree.  See btrfs_lock_root_node for the
@@ -4663,12 +4647,7 @@ int btrfs_next_old_leaf(struct btrfs_root *root, struct btrfs_path *path,
 	int ret;
 	int i;
 
-	/*
-	 * The nowait semantics are used only for write paths, where we don't
-	 * use the tree mod log and sequence numbers.
-	 */
-	if (time_seq)
-		ASSERT(!path->nowait);
+	ASSERT(!path->nowait);
 
 	nritems = btrfs_header_nritems(path->nodes[0]);
 	if (nritems == 0)
@@ -4688,14 +4667,7 @@ again:
 		if (path->need_commit_sem) {
 			path->need_commit_sem = 0;
 			need_commit_sem = true;
-			if (path->nowait) {
-				if (!down_read_trylock(&fs_info->commit_root_sem)) {
-					ret = -EAGAIN;
-					goto done;
-				}
-			} else {
-				down_read(&fs_info->commit_root_sem);
-			}
+			down_read(&fs_info->commit_root_sem);
 		}
 		ret = btrfs_search_slot(NULL, root, &key, path, 0, 0);
 	}
@@ -4771,7 +4743,7 @@ again:
 		next = c;
 		ret = read_block_for_search(root, path, &next, level,
 					    slot, &key);
-		if (ret == -EAGAIN && !path->nowait)
+		if (ret == -EAGAIN)
 			goto again;
 
 		if (ret < 0) {
@@ -4781,10 +4753,6 @@ again:
 
 		if (!path->skip_locking) {
 			ret = btrfs_try_tree_read_lock(next);
-			if (!ret && path->nowait) {
-				ret = -EAGAIN;
-				goto done;
-			}
 			if (!ret && time_seq) {
 				/*
 				 * If we don't get the lock, we may be racing
@@ -4815,7 +4783,7 @@ again:
 
 		ret = read_block_for_search(root, path, &next, level,
 					    0, &key);
-		if (ret == -EAGAIN && !path->nowait)
+		if (ret == -EAGAIN)
 			goto again;
 
 		if (ret < 0) {
@@ -4823,16 +4791,8 @@ again:
 			goto done;
 		}
 
-		if (!path->skip_locking) {
-			if (path->nowait) {
-				if (!btrfs_try_tree_read_lock(next)) {
-					ret = -EAGAIN;
-					goto done;
-				}
-			} else {
-				btrfs_tree_read_lock(next);
-			}
-		}
+		if (!path->skip_locking)
+			btrfs_tree_read_lock(next);
 	}
 	ret = 0;
 done:

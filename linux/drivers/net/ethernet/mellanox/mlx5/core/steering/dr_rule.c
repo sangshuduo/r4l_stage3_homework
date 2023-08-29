@@ -1200,8 +1200,7 @@ free_rule:
 	}
 
 remove_from_nic_tbl:
-	if (!nic_matcher->rules)
-		mlx5dr_matcher_remove_from_tbl_nic(dmn, nic_matcher);
+	mlx5dr_matcher_remove_from_tbl_nic(dmn, nic_matcher);
 
 free_hw_ste:
 	mlx5dr_domain_nic_unlock(nic_dmn);

@@ -1302,7 +1302,7 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
 	 * and context switches) submission.
 	 */
 
-	spin_lock_irq(&sched_engine->lock);
+	spin_lock(&sched_engine->lock);
 
 	/*
 	 * If the queue is higher priority than the last
@@ -1402,7 +1402,7 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
 				 * Even if ELSP[1] is occupied and not worthy
 				 * of timeslices, our queue might be.
 				 */
-				spin_unlock_irq(&sched_engine->lock);
+				spin_unlock(&sched_engine->lock);
 				return;
 			}
 		}
@@ -1428,7 +1428,7 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
 
 		if (last && !can_merge_rq(last, rq)) {
 			spin_unlock(&ve->base.sched_engine->lock);
-			spin_unlock_irq(&engine->sched_engine->lock);
+			spin_unlock(&engine->sched_engine->lock);
 			return; /* leave this for another sibling */
 		}
 
@@ -1590,7 +1590,7 @@ done:
 	 */
 	sched_engine->queue_priority_hint = queue_prio(sched_engine);
 	i915_sched_engine_reset_on_empty(sched_engine);
-	spin_unlock_irq(&sched_engine->lock);
+	spin_unlock(&sched_engine->lock);
 
 	/*
 	 * We can skip poking the HW if we ended up with exactly the same set
@@ -1614,6 +1614,13 @@ done:
 			i915_request_put(*port);
 		*execlists->pending = NULL;
 	}
+}
+
+static void execlists_dequeue_irq(struct intel_engine_cs *engine)
+{
+	local_irq_disable(); /* Suspend interrupts across request submission */
+	execlists_dequeue(engine);
+	local_irq_enable(); /* flush irq_work (e.g. breadcrumb enabling) */
 }
 
 static void clear_ports(struct i915_request **ports, int count)
@@ -2461,7 +2468,7 @@ static void execlists_submission_tasklet(struct tasklet_struct *t)
 	}
 
 	if (!engine->execlists.pending[0]) {
-		execlists_dequeue(engine);
+		execlists_dequeue_irq(engine);
 		start_timeslice(engine);
 	}
 
@@ -4135,33 +4142,6 @@ void intel_execlists_show_requests(struct intel_engine_cs *engine,
 	}
 
 	spin_unlock_irqrestore(&sched_engine->lock, flags);
-}
-
-static unsigned long list_count(struct list_head *list)
-{
-	struct list_head *pos;
-	unsigned long count = 0;
-
-	list_for_each(pos, list)
-		count++;
-
-	return count;
-}
-
-void intel_execlists_dump_active_requests(struct intel_engine_cs *engine,
-					  struct i915_request *hung_rq,
-					  struct drm_printer *m)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&engine->sched_engine->lock, flags);
-
-	intel_engine_dump_active_requests(&engine->sched_engine->requests, hung_rq, m);
-
-	drm_printf(m, "\tOn hold?: %lu\n",
-		   list_count(&engine->sched_engine->hold));
-
-	spin_unlock_irqrestore(&engine->sched_engine->lock, flags);
 }
 
 #if IS_ENABLED(CONFIG_DRM_I915_SELFTEST)

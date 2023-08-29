@@ -509,6 +509,7 @@
 		interrupt-parent = <&gpio0>;
 		interrupts = <RK_PD3 IRQ_TYPE_LEVEL_LOW>;
 		#clock-cells = <0>;
+		clock-frequency = <32768>;
 		clock-output-names = "rtcic_32kout";
 		pinctrl-names = "default";
 		pinctrl-0 = <&hym8563_int>;
@@ -642,7 +643,7 @@
 	disable-wp;
 	pinctrl-names = "default";
 	pinctrl-0 = <&sdmmc0_bus4 &sdmmc0_clk &sdmmc0_cmd &sdmmc0_det>;
-	sd-uhs-sdr50;
+	sd-uhs-sdr104;
 	vmmc-supply = <&vcc3v3_sd>;
 	vqmmc-supply = <&vccio_sd>;
 	status = "okay";

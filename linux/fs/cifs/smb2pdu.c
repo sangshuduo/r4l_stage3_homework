@@ -541,10 +541,9 @@ static void
 assemble_neg_contexts(struct smb2_negotiate_req *req,
 		      struct TCP_Server_Info *server, unsigned int *total_len)
 {
-	unsigned int ctxt_len, neg_context_count;
-	struct TCP_Server_Info *pserver;
 	char *pneg_ctxt;
-	char *hostname;
+	char *hostname = NULL;
+	unsigned int ctxt_len, neg_context_count;
 
 	if (*total_len > 200) {
 		/* In case length corrupted don't want to overrun smb buffer */
@@ -575,9 +574,8 @@ assemble_neg_contexts(struct smb2_negotiate_req *req,
 	 * secondary channels don't have the hostname field populated
 	 * use the hostname field in the primary channel instead
 	 */
-	pserver = CIFS_SERVER_IS_CHAN(server) ? server->primary_server : server;
-	cifs_server_lock(pserver);
-	hostname = pserver->hostname;
+	hostname = CIFS_SERVER_IS_CHAN(server) ?
+		server->primary_server->hostname : server->hostname;
 	if (hostname && (hostname[0] != 0)) {
 		ctxt_len = build_netname_ctxt((struct smb2_netname_neg_context *)pneg_ctxt,
 					      hostname);
@@ -586,7 +584,6 @@ assemble_neg_contexts(struct smb2_negotiate_req *req,
 		neg_context_count = 3;
 	} else
 		neg_context_count = 2;
-	cifs_server_unlock(pserver);
 
 	build_posix_ctxt((struct smb2_posix_neg_context *)pneg_ctxt);
 	*total_len += sizeof(struct smb2_posix_neg_context);
@@ -1344,13 +1341,14 @@ SMB2_sess_alloc_buffer(struct SMB2_sess_data *sess_data)
 static void
 SMB2_sess_free_buffer(struct SMB2_sess_data *sess_data)
 {
-	struct kvec *iov = sess_data->iov;
+	int i;
 
-	/* iov[1] is already freed by caller */
-	if (sess_data->buf0_type != CIFS_NO_BUFFER && iov[0].iov_base)
-		memzero_explicit(iov[0].iov_base, iov[0].iov_len);
+	/* zero the session data before freeing, as it might contain sensitive info (keys, etc) */
+	for (i = 0; i < 2; i++)
+		if (sess_data->iov[i].iov_base)
+			memzero_explicit(sess_data->iov[i].iov_base, sess_data->iov[i].iov_len);
 
-	free_rsp_buf(sess_data->buf0_type, iov[0].iov_base);
+	free_rsp_buf(sess_data->buf0_type, sess_data->iov[0].iov_base);
 	sess_data->buf0_type = CIFS_NO_BUFFER;
 }
 
@@ -1453,7 +1451,6 @@ SMB2_auth_kerberos(struct SMB2_sess_data *sess_data)
 
 	/* keep session key if binding */
 	if (!is_binding) {
-		kfree_sensitive(ses->auth_key.response);
 		ses->auth_key.response = kmemdup(msg->data, msg->sesskey_len,
 						 GFP_KERNEL);
 		if (!ses->auth_key.response) {
@@ -1483,11 +1480,8 @@ SMB2_auth_kerberos(struct SMB2_sess_data *sess_data)
 out_put_spnego_key:
 	key_invalidate(spnego_key);
 	key_put(spnego_key);
-	if (rc) {
+	if (rc)
 		kfree_sensitive(ses->auth_key.response);
-		ses->auth_key.response = NULL;
-		ses->auth_key.len = 0;
-	}
 out:
 	sess_data->result = rc;
 	sess_data->func = NULL;
@@ -1537,7 +1531,7 @@ SMB2_sess_auth_rawntlmssp_negotiate(struct SMB2_sess_data *sess_data)
 					  &blob_length, ses, server,
 					  sess_data->nls_cp);
 	if (rc)
-		goto out;
+		goto out_err;
 
 	if (use_spnego) {
 		/* BB eventually need to add this */
@@ -1584,7 +1578,7 @@ SMB2_sess_auth_rawntlmssp_negotiate(struct SMB2_sess_data *sess_data)
 	}
 
 out:
-	kfree_sensitive(ntlmssp_blob);
+	memzero_explicit(ntlmssp_blob, blob_length);
 	SMB2_sess_free_buffer(sess_data);
 	if (!rc) {
 		sess_data->result = 0;
@@ -1668,7 +1662,7 @@ SMB2_sess_auth_rawntlmssp_authenticate(struct SMB2_sess_data *sess_data)
 	}
 #endif
 out:
-	kfree_sensitive(ntlmssp_blob);
+	memzero_explicit(ntlmssp_blob, blob_length);
 	SMB2_sess_free_buffer(sess_data);
 	kfree_sensitive(ses->ntlmssp);
 	ses->ntlmssp = NULL;
@@ -4163,15 +4157,12 @@ smb2_readv_callback(struct mid_q_entry *mid)
 				(struct smb2_hdr *)rdata->iov[0].iov_base;
 	struct cifs_credits credits = { .value = 0, .instance = 0 };
 	struct smb_rqst rqst = { .rq_iov = &rdata->iov[1],
-				 .rq_nvec = 1, };
-
-	if (rdata->got_bytes) {
-		rqst.rq_pages = rdata->pages;
-		rqst.rq_offset = rdata->page_offset;
-		rqst.rq_npages = rdata->nr_pages;
-		rqst.rq_pagesz = rdata->pagesz;
-		rqst.rq_tailsz = rdata->tailsz;
-	}
+				 .rq_nvec = 1,
+				 .rq_pages = rdata->pages,
+				 .rq_offset = rdata->page_offset,
+				 .rq_npages = rdata->nr_pages,
+				 .rq_pagesz = rdata->pagesz,
+				 .rq_tailsz = rdata->tailsz };
 
 	WARN_ONCE(rdata->server != mid->server,
 		  "rdata server %p != mid server %p",

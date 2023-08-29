@@ -25,8 +25,7 @@ static struct dma_fence *msm_job_run(struct drm_sched_job *job)
 
 		msm_gem_lock(obj);
 		msm_gem_unpin_vma_fenced(submit->bos[i].vma, fctx);
-		msm_gem_unpin_locked(obj);
-		submit->bos[i].flags &= ~(BO_VMA_PINNED | BO_OBJ_PINNED);
+		submit->bos[i].flags &= ~BO_VMA_PINNED;
 		msm_gem_unlock(obj);
 	}
 

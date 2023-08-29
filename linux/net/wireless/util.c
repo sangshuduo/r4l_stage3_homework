@@ -1557,12 +1557,10 @@ static u32 cfg80211_calculate_bitrate_eht(struct rate_info *rate)
 	tmp = result;
 	tmp *= SCALE;
 	do_div(tmp, mcs_divisors[rate->mcs]);
+	result = tmp;
 
 	/* and take NSS */
-	tmp *= rate->nss;
-	do_div(tmp, 8);
-
-	result = tmp;
+	result = (result * rate->nss) / 8;
 
 	return result / 10000;
 }

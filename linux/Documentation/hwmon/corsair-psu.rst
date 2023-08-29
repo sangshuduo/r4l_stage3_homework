@@ -19,8 +19,6 @@ Supported devices:
 
   Corsair HX1200i
 
-  Corsair HX1500i
-
   Corsair RM550i
 
   Corsair RM650i

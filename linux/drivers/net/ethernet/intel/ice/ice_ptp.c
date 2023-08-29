@@ -614,14 +614,11 @@ static u64 ice_ptp_extend_40b_ts(struct ice_pf *pf, u64 in_tstamp)
  * 2) extend the 40b timestamp value to get a 64bit timestamp
  * 3) send that timestamp to the stack
  *
- * Returns true if all timestamps were handled, and false if any slots remain
- * without a timestamp.
- *
- * After looping, if we still have waiting SKBs, return false. This may cause
- * us effectively poll even when not strictly necessary. We do this because
- * it's possible a new timestamp was requested around the same time as the
- * interrupt. In some cases hardware might not interrupt us again when the
- * timestamp is captured.
+ * After looping, if we still have waiting SKBs, return true. This may cause us
+ * effectively poll even when not strictly necessary. We do this because it's
+ * possible a new timestamp was requested around the same time as the interrupt.
+ * In some cases hardware might not interrupt us again when the timestamp is
+ * captured.
  *
  * Note that we only take the tracking lock when clearing the bit and when
  * checking if we need to re-queue this task. The only place where bits can be
@@ -639,12 +636,12 @@ static u64 ice_ptp_extend_40b_ts(struct ice_pf *pf, u64 in_tstamp)
 static bool ice_ptp_tx_tstamp(struct ice_ptp_tx *tx)
 {
 	struct ice_ptp_port *ptp_port;
-	bool more_timestamps;
+	bool ts_handled = true;
 	struct ice_pf *pf;
 	u8 idx;
 
 	if (!tx->init)
-		return true;
+		return false;
 
 	ptp_port = container_of(tx, struct ice_ptp_port, tx);
 	pf = ptp_port_to_pf(ptp_port);
@@ -701,10 +698,11 @@ static bool ice_ptp_tx_tstamp(struct ice_ptp_tx *tx)
 	 * poll for remaining timestamps.
 	 */
 	spin_lock(&tx->lock);
-	more_timestamps = tx->init && !bitmap_empty(tx->in_use, tx->len);
+	if (!bitmap_empty(tx->in_use, tx->len))
+		ts_handled = false;
 	spin_unlock(&tx->lock);
 
-	return !more_timestamps;
+	return ts_handled;
 }
 
 /**
@@ -774,9 +772,6 @@ static void
 ice_ptp_release_tx_tracker(struct ice_pf *pf, struct ice_ptp_tx *tx)
 {
 	tx->init = 0;
-
-	/* wait for potentially outstanding interrupt to complete */
-	synchronize_irq(pf->msix_entries[pf->oicr_idx].vector);
 
 	ice_ptp_flush_tx_tracker(pf, tx);
 
@@ -2386,7 +2381,10 @@ s8 ice_ptp_request_ts(struct ice_ptp_tx *tx, struct sk_buff *skb)
  */
 bool ice_ptp_process_ts(struct ice_pf *pf)
 {
-	return ice_ptp_tx_tstamp(&pf->ptp.port.tx);
+	if (pf->ptp.port.tx.init)
+		return ice_ptp_tx_tstamp(&pf->ptp.port.tx);
+
+	return false;
 }
 
 static void ice_ptp_periodic_work(struct kthread_work *work)

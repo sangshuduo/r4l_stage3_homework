@@ -3115,6 +3115,4 @@
 
 #define PCI_VENDOR_ID_NCUBE		0x10ff
 
-#define PCI_VENDOR_ID_BST               0x1ef1
-#define PCI_DEVICE_ID_BST_A1000B_VNET   0x240
 #endif /* _LINUX_PCI_IDS_H */

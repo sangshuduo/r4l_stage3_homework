@@ -135,24 +135,11 @@ static int imx93_pd_probe(struct platform_device *pdev)
 
 	ret = pm_genpd_init(&domain->genpd, NULL, domain->init_off);
 	if (ret)
-		goto err_clk_unprepare;
+		return ret;
 
 	platform_set_drvdata(pdev, domain);
 
-	ret = of_genpd_add_provider_simple(np, &domain->genpd);
-	if (ret)
-		goto err_genpd_remove;
-
-	return 0;
-
-err_genpd_remove:
-	pm_genpd_remove(&domain->genpd);
-
-err_clk_unprepare:
-	if (!domain->init_off)
-		clk_bulk_disable_unprepare(domain->num_clks, domain->clks);
-
-	return ret;
+	return of_genpd_add_provider_simple(np, &domain->genpd);
 }
 
 static const struct of_device_id imx93_pd_ids[] = {

@@ -2416,9 +2416,6 @@ void *__pskb_pull_tail(struct sk_buff *skb, int delta)
 				insp = list;
 			} else {
 				/* Eaten partially. */
-				if (skb_is_gso(skb) && !list->head_frag &&
-				    skb_headlen(list))
-					skb_shinfo(skb)->gso_type |= SKB_GSO_DODGY;
 
 				if (skb_shared(list)) {
 					/* Sucks! We need to fork list. :-( */
@@ -3974,7 +3971,7 @@ int skb_append_pagefrags(struct sk_buff *skb, struct page *page,
 	} else if (i < MAX_SKB_FRAGS) {
 		skb_zcopy_downgrade_managed(skb);
 		get_page(page);
-		skb_fill_page_desc_noacc(skb, i, page, offset, size);
+		skb_fill_page_desc(skb, i, page, offset, size);
 	} else {
 		return -EMSGSIZE;
 	}
@@ -4034,7 +4031,7 @@ struct sk_buff *skb_segment_list(struct sk_buff *skb,
 
 	skb_shinfo(skb)->frag_list = NULL;
 
-	while (list_skb) {
+	do {
 		nskb = list_skb;
 		list_skb = list_skb->next;
 
@@ -4080,7 +4077,8 @@ struct sk_buff *skb_segment_list(struct sk_buff *skb,
 		if (skb_needs_linearize(nskb, features) &&
 		    __skb_linearize(nskb))
 			goto err_linearize;
-	}
+
+	} while (list_skb);
 
 	skb->truesize = skb->truesize - delta_truesize;
 	skb->data_len = skb->data_len - delta_len;
@@ -4136,25 +4134,23 @@ struct sk_buff *skb_segment(struct sk_buff *head_skb,
 	int i = 0;
 	int pos;
 
-	if ((skb_shinfo(head_skb)->gso_type & SKB_GSO_DODGY) &&
-	    mss != GSO_BY_FRAGS && mss != skb_headlen(head_skb)) {
-		struct sk_buff *check_skb;
-
-		for (check_skb = list_skb; check_skb; check_skb = check_skb->next) {
-			if (skb_headlen(check_skb) && !check_skb->head_frag) {
-				/* gso_size is untrusted, and we have a frag_list with
-				 * a linear non head_frag item.
-				 *
-				 * If head_skb's headlen does not fit requested gso_size,
-				 * it means that the frag_list members do NOT terminate
-				 * on exact gso_size boundaries. Hence we cannot perform
-				 * skb_frag_t page sharing. Therefore we must fallback to
-				 * copying the frag_list skbs; we do so by disabling SG.
-				 */
-				features &= ~NETIF_F_SG;
-				break;
-			}
-		}
+	if (list_skb && !list_skb->head_frag && skb_headlen(list_skb) &&
+	    (skb_shinfo(head_skb)->gso_type & SKB_GSO_DODGY)) {
+		/* gso_size is untrusted, and we have a frag_list with a linear
+		 * non head_frag head.
+		 *
+		 * (we assume checking the first list_skb member suffices;
+		 * i.e if either of the list_skb members have non head_frag
+		 * head, then the first one has too).
+		 *
+		 * If head_skb's headlen does not fit requested gso_size, it
+		 * means that the frag_list members do NOT terminate on exact
+		 * gso_size boundaries. Hence we cannot perform skb_frag_t page
+		 * sharing. Therefore we must fallback to copying the frag_list
+		 * skbs; we do so by disabling SG.
+		 */
+		if (mss != GSO_BY_FRAGS && mss != skb_headlen(head_skb))
+			features &= ~NETIF_F_SG;
 	}
 
 	__skb_push(head_skb, doffset);
@@ -6662,11 +6658,6 @@ nodefer:	__kfree_skb(skb);
 	/* Make sure to trigger NET_RX_SOFTIRQ on the remote CPU
 	 * if we are unlucky enough (this seems very unlikely).
 	 */
-	if (unlikely(kick) && !cmpxchg(&sd->defer_ipi_scheduled, 0, 1)) {
-#ifndef CONFIG_PREEMPT_RT
+	if (unlikely(kick) && !cmpxchg(&sd->defer_ipi_scheduled, 0, 1))
 		smp_call_function_single_async(cpu, &sd->defer_csd);
-#else
-		schedule_work_on(cpu, &sd->defer_work);
-#endif
-	}
 }

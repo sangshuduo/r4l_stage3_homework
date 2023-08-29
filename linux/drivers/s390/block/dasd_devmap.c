@@ -1954,7 +1954,7 @@ dasd_copy_pair_show(struct device *dev,
 			break;
 		}
 	}
-	if (i == DASD_CP_ENTRIES)
+	if (!copy->entry[i].primary)
 		goto out;
 
 	/* print all secondary */

@@ -215,6 +215,11 @@ cifs_fattr_to_inode(struct inode *inode, struct cifs_fattr *fattr)
 		kfree(cifs_i->symlink_target);
 		cifs_i->symlink_target = fattr->cf_symlink_target;
 		fattr->cf_symlink_target = NULL;
+
+		if (unlikely(!cifs_i->symlink_target))
+			inode->i_link = ERR_PTR(-EOPNOTSUPP);
+		else
+			inode->i_link = cifs_i->symlink_target;
 	}
 	spin_unlock(&inode->i_lock);
 
@@ -363,10 +368,8 @@ cifs_get_file_info_unix(struct file *filp)
 
 	if (cfile->symlink_target) {
 		fattr.cf_symlink_target = kstrdup(cfile->symlink_target, GFP_KERNEL);
-		if (!fattr.cf_symlink_target) {
-			rc = -ENOMEM;
-			goto cifs_gfiunix_out;
-		}
+		if (!fattr.cf_symlink_target)
+			return -ENOMEM;
 	}
 
 	rc = CIFSSMBUnixQFileInfo(xid, tcon, cfile->fid.netfid, &find_data);
@@ -991,6 +994,12 @@ int cifs_get_inode_info(struct inode **inode, const char *full_path,
 		}
 		rc = server->ops->query_path_info(xid, tcon, cifs_sb, full_path, &tmp_data,
 						  &adjust_tz, &is_reparse_point);
+#ifdef CONFIG_CIFS_DFS_UPCALL
+		if (rc == -ENOENT && is_tcon_dfs(tcon))
+			rc = cifs_dfs_query_info_nonascii_quirk(xid, tcon,
+								cifs_sb,
+								full_path);
+#endif
 		data = &tmp_data;
 	}
 

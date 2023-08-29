@@ -36,7 +36,6 @@
 #include <generated/utsrelease.h>
 #include <linux/pci-p2pdma.h>
 
-#include <drm/drm_aperture.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/amdgpu_drm.h>
@@ -89,8 +88,6 @@ MODULE_FIRMWARE("amdgpu/navi12_gpu_info.bin");
 #define AMDGPU_RESUME_MS		2000
 #define AMDGPU_MAX_RETRY_LIMIT		2
 #define AMDGPU_RETRY_SRIOV_RESET(r) ((r) == -EBUSY || (r) == -ETIMEDOUT || (r) == -EINVAL)
-
-static const struct drm_driver amdgpu_kms_driver;
 
 const char *amdgpu_asic_name[] = {
 	"TAHITI",
@@ -2465,11 +2462,6 @@ static int amdgpu_device_ip_init(struct amdgpu_device *adev)
 			if (!amdgpu_sriov_vf(adev)) {
 				struct amdgpu_hive_info *hive = amdgpu_get_xgmi_hive(adev);
 
-				if (WARN_ON(!hive)) {
-					r = -ENOENT;
-					goto init_failed;
-				}
-
 				if (!hive->reset_domain ||
 				    !amdgpu_reset_get_reset_domain(hive->reset_domain)) {
 					r = -ENOENT;
@@ -2936,14 +2928,6 @@ static int amdgpu_device_ip_suspend_phase1(struct amdgpu_device *adev)
 	amdgpu_device_set_pg_state(adev, AMD_PG_STATE_UNGATE);
 	amdgpu_device_set_cg_state(adev, AMD_CG_STATE_UNGATE);
 
-	/*
-	 * Per PMFW team's suggestion, driver needs to handle gfxoff
-	 * and df cstate features disablement for gpu reset(e.g. Mode1Reset)
-	 * scenario. Add the missing df cstate disablement here.
-	 */
-	if (amdgpu_dpm_set_df_cstate(adev, DF_CSTATE_DISALLOW))
-		dev_warn(adev->dev, "Failed to disallow df cstate");
-
 	for (i = adev->num_ip_blocks - 1; i >= 0; i--) {
 		if (!adev->ip_blocks[i].status.valid)
 			continue;
@@ -3008,15 +2992,14 @@ static int amdgpu_device_ip_suspend_phase2(struct amdgpu_device *adev)
 			continue;
 		}
 
-		/* skip suspend of gfx/mes and psp for S0ix
+		/* skip suspend of gfx and psp for S0ix
 		 * gfx is in gfxoff state, so on resume it will exit gfxoff just
 		 * like at runtime. PSP is also part of the always on hardware
 		 * so no need to suspend it.
 		 */
 		if (adev->in_s0ix &&
 		    (adev->ip_blocks[i].version->type == AMD_IP_BLOCK_TYPE_PSP ||
-		     adev->ip_blocks[i].version->type == AMD_IP_BLOCK_TYPE_GFX ||
-		     adev->ip_blocks[i].version->type == AMD_IP_BLOCK_TYPE_MES))
+		     adev->ip_blocks[i].version->type == AMD_IP_BLOCK_TYPE_GFX))
 			continue;
 
 		/* XXX handle errors */
@@ -3219,15 +3202,6 @@ static int amdgpu_device_ip_resume_phase2(struct amdgpu_device *adev)
 			return r;
 		}
 		adev->ip_blocks[i].status.hw = true;
-
-		if (adev->in_s0ix && adev->ip_blocks[i].version->type == AMD_IP_BLOCK_TYPE_SMC) {
-			/* disable gfxoff for IP resume. The gfxoff will be re-enabled in
-			 * amdgpu_device_resume() after IP resume.
-			 */
-			amdgpu_gfx_off_ctrl(adev, false);
-			DRM_DEBUG("will disable gfxoff for re-initializing other blocks\n");
-		}
-
 	}
 
 	return 0;
@@ -3680,11 +3654,6 @@ int amdgpu_device_init(struct amdgpu_device *adev,
 	if (r)
 		return r;
 
-	/* Get rid of things like offb */
-	r = drm_aperture_remove_conflicting_pci_framebuffers(adev->pdev, &amdgpu_kms_driver);
-	if (r)
-		return r;
-
 	/* Enable TMZ based on IP_VERSION */
 	amdgpu_gmc_tmz_set(adev);
 
@@ -4074,18 +4043,15 @@ void amdgpu_device_fini_sw(struct amdgpu_device *adev)
  * at suspend time.
  *
  */
-static int amdgpu_device_evict_resources(struct amdgpu_device *adev)
+static void amdgpu_device_evict_resources(struct amdgpu_device *adev)
 {
-	int ret;
-
 	/* No need to evict vram on APUs for suspend to ram or s2idle */
 	if ((adev->in_s3 || adev->in_s0ix) && (adev->flags & AMD_IS_APU))
-		return 0;
+		return;
 
-	ret = amdgpu_ttm_evict_resources(adev, TTM_PL_VRAM);
-	if (ret)
+	if (amdgpu_ttm_evict_resources(adev, TTM_PL_VRAM))
 		DRM_WARN("evicting device resources failed\n");
-	return ret;
+
 }
 
 /*
@@ -4135,9 +4101,7 @@ int amdgpu_device_suspend(struct drm_device *dev, bool fbcon)
 	if (!adev->in_s0ix)
 		amdgpu_amdkfd_suspend(adev, adev->in_runpm);
 
-	r = amdgpu_device_evict_resources(adev);
-	if (r)
-		return r;
+	amdgpu_device_evict_resources(adev);
 
 	amdgpu_fence_driver_hw_fini(adev);
 
@@ -4213,13 +4177,6 @@ int amdgpu_device_resume(struct drm_device *dev, bool fbcon)
 	/* Make sure IB tests flushed */
 	flush_delayed_work(&adev->delayed_init_work);
 
-	if (adev->in_s0ix) {
-		/* re-enable gfxoff after IP resume. This re-enables gfxoff after
-		 * it was disabled for IP resume in amdgpu_device_ip_resume_phase2().
-		 */
-		amdgpu_gfx_off_ctrl(adev, true);
-		DRM_DEBUG("will enable gfxoff for the mission mode\n");
-	}
 	if (fbcon)
 		drm_fb_helper_set_suspend_unlocked(adev_to_drm(adev)->fb_helper, false);
 
@@ -5041,8 +4998,6 @@ static void amdgpu_device_resume_display_audio(struct amdgpu_device *adev)
 		pm_runtime_enable(&(p->dev));
 		pm_runtime_resume(&(p->dev));
 	}
-
-	pci_dev_put(p);
 }
 
 static int amdgpu_device_suspend_display_audio(struct amdgpu_device *adev)
@@ -5081,7 +5036,6 @@ static int amdgpu_device_suspend_display_audio(struct amdgpu_device *adev)
 
 		if (expires < ktime_get_mono_fast_ns()) {
 			dev_warn(adev->dev, "failed to suspend display audio\n");
-			pci_dev_put(p);
 			/* TODO: abort the succeeding gpu reset? */
 			return -ETIMEDOUT;
 		}
@@ -5089,7 +5043,6 @@ static int amdgpu_device_suspend_display_audio(struct amdgpu_device *adev)
 
 	pm_runtime_disable(&(p->dev));
 
-	pci_dev_put(p);
 	return 0;
 }
 
@@ -5257,6 +5210,7 @@ int amdgpu_device_gpu_recover(struct amdgpu_device *adev,
 
 	reset_context->job = job;
 	reset_context->hive = hive;
+
 	/*
 	 * Build list of devices to reset.
 	 * In case we are in XGMI hive mode, resort the device list
@@ -5383,8 +5337,11 @@ retry:	/* Rest of adevs pre asic reset from XGMI hive. */
 			amdgpu_ras_resume(adev);
 	} else {
 		r = amdgpu_do_asic_reset(device_list_handle, reset_context);
-		if (r && r == -EAGAIN)
+		if (r && r == -EAGAIN) {
+			set_bit(AMDGPU_SKIP_MODE2_RESET, &reset_context->flags);
+			adev->asic_reset_res = 0;
 			goto retry;
+		}
 
 		if (!r && gpu_reset_for_dev_remove)
 			goto recover_end;
@@ -5420,7 +5377,7 @@ skip_hw_reset:
 			drm_sched_start(&ring->sched, !tmp_adev->asic_reset_res);
 		}
 
-		if (adev->enable_mes && adev->ip_versions[GC_HWIP][0] != IP_VERSION(11, 0, 3))
+		if (adev->enable_mes)
 			amdgpu_mes_self_test(tmp_adev);
 
 		if (!drm_drv_uses_atomic_modeset(adev_to_drm(tmp_adev)) && !job_signaled) {
@@ -5820,6 +5777,7 @@ pci_ers_result_t amdgpu_pci_slot_reset(struct pci_dev *pdev)
 	reset_context.reset_req_dev = adev;
 	set_bit(AMDGPU_NEED_FULL_RESET, &reset_context.flags);
 	set_bit(AMDGPU_SKIP_HW_RESET, &reset_context.flags);
+	set_bit(AMDGPU_SKIP_MODE2_RESET, &reset_context.flags);
 
 	adev->no_hw_access = true;
 	r = amdgpu_device_pre_asic_reset(adev, &reset_context);
@@ -6061,45 +6019,4 @@ struct dma_fence *amdgpu_device_switch_gang(struct amdgpu_device *adev,
 
 	dma_fence_put(old);
 	return NULL;
-}
-
-bool amdgpu_device_has_display_hardware(struct amdgpu_device *adev)
-{
-	switch (adev->asic_type) {
-#ifdef CONFIG_DRM_AMDGPU_SI
-	case CHIP_HAINAN:
-#endif
-	case CHIP_TOPAZ:
-		/* chips with no display hardware */
-		return false;
-#ifdef CONFIG_DRM_AMDGPU_SI
-	case CHIP_TAHITI:
-	case CHIP_PITCAIRN:
-	case CHIP_VERDE:
-	case CHIP_OLAND:
-#endif
-#ifdef CONFIG_DRM_AMDGPU_CIK
-	case CHIP_BONAIRE:
-	case CHIP_HAWAII:
-	case CHIP_KAVERI:
-	case CHIP_KABINI:
-	case CHIP_MULLINS:
-#endif
-	case CHIP_TONGA:
-	case CHIP_FIJI:
-	case CHIP_POLARIS10:
-	case CHIP_POLARIS11:
-	case CHIP_POLARIS12:
-	case CHIP_VEGAM:
-	case CHIP_CARRIZO:
-	case CHIP_STONEY:
-		/* chips with display hardware */
-		return true;
-	default:
-		/* IP discovery */
-		if (!adev->ip_versions[DCE_HWIP][0] ||
-		    (adev->harvest_ip_mask & AMD_HARVEST_IP_DMU_MASK))
-			return false;
-		return true;
-	}
 }
